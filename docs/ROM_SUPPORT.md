@@ -5,7 +5,7 @@
 | NES/Famicom | .nes, .unif/.unf, .zip (single ROM) | iNES/NES2.0 magic + PRG>0; "UNIF" magic | FCEUmm | Playable |
 | GB/GBC | .gb/.gbc | Nintendo logo @0x104, CGB flag @0x143 | — | Detected only (M4) |
 | GBA | .gba | 0x96 @0xB2 + ARM branch | — | Detected only (M4) |
-| Mega Drive | .md/.gen | "SEGA" @0x100 | — | Detected only (M5) |
+| Mega Drive | .md/.gen | "SEGA" @0x100 | Genesis Plus GX | Playable (3-button pad: A/B/C/START/MODE) |
 | SNES | .sfc/.smc | needs internal-header check | — | M5 |
 | PS1 | .cue/.chd | — | — | M6 |
 

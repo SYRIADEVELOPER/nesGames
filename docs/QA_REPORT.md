@@ -23,3 +23,17 @@ and sets the backdrop colour from controller 1 (none=blue, A=red, B=green, other
 | Audible audio quality / latency | NOT TESTED | needs a human listener |
 | SAF folder picker and library scan on device | NOT TESTED | requires interactive picker; scanner logic covered by unit tests |
 | Commercial ROMs | NOT TESTED | none provided as NES |
+
+## Mega Drive: Tiny Toon Adventures – Buster's Hidden Treasure (Europe), user-supplied ROM
+Same device. Screenshots are in docs/qa/.
+
+| Test | Result | Evidence |
+|---|---|---|
+| Boot (Genesis Plus GX) | PASS | Konami logo renders (md_1_title.png); resolution switches 320x224 ↔ 256x224 correctly |
+| Timing | PASS | ~50 frames/s, correct for a PAL cartridge |
+| Audio data path | PASS | ~44.3k audio frames/s delivered; no underruns after startup |
+| START gets into gameplay | PASS | md_2_after_start.png |
+| D-pad Right walks and scrolls | PASS | md_3_walk_right.png, mask=128 |
+| C button jumps | PASS | md_5_fullscreen_jump.png |
+| Full-screen mode (default) | PASS | the picture fills the whole 3120x1440 display |
+| Switching core NES → MD in one process | PASS | NES test ROM then Tiny Toon launched in the same process with no restart |

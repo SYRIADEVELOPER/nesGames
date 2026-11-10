@@ -6,7 +6,10 @@ import java.io.File
 
 /** Cores bundled inside the signed APK. Only these files, from nativeLibraryDir, are ever dlopen'ed. */
 object Cores {
-    private val bundled = mapOf(GameSystem.NES to "libfceumm_libretro.so")
+    private val bundled = mapOf(
+        GameSystem.NES to "libfceumm_libretro.so",
+        GameSystem.MD to "libgenesis_plus_gx_libretro.so",
+    )
 
     fun isAvailable(system: GameSystem) = system in bundled
 

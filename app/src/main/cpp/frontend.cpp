@@ -113,7 +113,7 @@ struct State {
     GLuint prog = 0, tex = 0;
     GLint locPos = -1, locUv = -1;
     int viewW = 1, viewH = 1, texW = 0, texH = 0;
-    bool integerScale = false;
+    int scaleMode = 2;   // 0 original aspect, 1 integer, 2 full screen (default)
 } g;
 
 void coreLog(enum retro_log_level level, const char *fmt, ...) {
@@ -293,7 +293,10 @@ bool sym(T &fn, const char *name) {
 
 std::string loadCoreLib(const std::string &path) {
     if (g.core.handle && g.core.path == path) return {};
-    if (g.core.handle) return "another core is already resident";
+    if (g.core.handle) {  // previous game already unloaded + deinit'ed by stopAndUnload()
+        dlclose(g.core.handle);
+        g.core = CoreApi{};
+    }
     g.core.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!g.core.handle) return std::string("dlopen failed: ") + dlerror();
     auto &c = g.core;
@@ -469,7 +472,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nat
     return g.core.unserialize(buf.data(), buf.size());
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetIntegerScale(JNIEnv *, jobject, jboolean on) { g.integerScale = on; }
+extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetScaleMode(JNIEnv *, jobject, jint mode) { g.scaleMode = mode; }
 
 extern "C" JNIEXPORT jlongArray JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeGetStats(JNIEnv *env, jobject) {
     jlong v[8] = {g.frames, g.videoFrames, g.audioFrames, g.underruns, (jlong) g.lastHash.load(),
@@ -527,7 +530,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeD
     float a = g.aspect;
     int w = g.viewW, h = (int) (g.viewW / a);
     if (h > g.viewH) { h = g.viewH; w = (int) (g.viewH * a); }
-    if (g.integerScale) {
+    if (g.scaleMode == 2) { w = g.viewW; h = g.viewH; }
+    else if (g.scaleMode == 1) {
         int s = std::max(1, std::min(g.viewW / g.texW, g.viewH / g.texH));
         h = g.texH * s;
         w = (int) (h * a);

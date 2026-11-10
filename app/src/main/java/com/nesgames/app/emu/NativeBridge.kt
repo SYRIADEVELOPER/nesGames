@@ -16,7 +16,8 @@ object NativeBridge {
     external fun nativeSaveSram(): Boolean
     external fun nativeSaveState(path: String): Boolean
     external fun nativeLoadState(path: String): Boolean
-    external fun nativeSetIntegerScale(on: Boolean)
+    /** 0 = original aspect, 1 = integer scale, 2 = full screen */
+    external fun nativeSetScaleMode(mode: Int)
     /** [frames, videoFrames, audioFrames, underruns, frameHash, centerPixelRGBA, width, height] */
     external fun nativeGetStats(): LongArray
     external fun nativeGetFps(): Double

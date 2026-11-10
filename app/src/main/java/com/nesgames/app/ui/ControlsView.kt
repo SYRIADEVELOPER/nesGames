@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
 import com.nesgames.app.emu.RetroPad
+import com.nesgames.app.library.GameSystem
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.min
@@ -16,13 +17,19 @@ import kotlin.math.min
  * Multi-touch NES pad. Every MotionEvent recomputes the full button mask from all live
  * pointers, so D-pad + A/B chords and finger slides between buttons behave reliably.
  */
-class ControlsView(ctx: Context, private val onMask: (Int) -> Unit, private val onMenu: () -> Unit) : View(ctx) {
+class ControlsView(ctx: Context, system: GameSystem, private val onMask: (Int) -> Unit, private val onMenu: () -> Unit) : View(ctx) {
     private class Btn(val id: Int, val label: String, var cx: Float = 0f, var cy: Float = 0f, var r: Float = 0f, val pill: Boolean = false)
 
-    private val buttons = listOf(
-        Btn(RetroPad.A, "A"), Btn(RetroPad.B, "B"),
-        Btn(RetroPad.SELECT, "SELECT", pill = true), Btn(RetroPad.START, "START", pill = true),
-    )
+    // Face buttons listed right-to-left. Mega Drive mapping follows Genesis Plus GX: Y=A, B=B, A=C.
+    private val face = when (system) {
+        GameSystem.MD -> listOf(Btn(RetroPad.A, "C"), Btn(RetroPad.B, "B"), Btn(RetroPad.Y, "A"))
+        else -> listOf(Btn(RetroPad.A, "A"), Btn(RetroPad.B, "B"))
+    }
+    private val meta = when (system) {
+        GameSystem.MD -> listOf(Btn(RetroPad.SELECT, "MODE", pill = true), Btn(RetroPad.START, "START", pill = true))
+        else -> listOf(Btn(RetroPad.SELECT, "SELECT", pill = true), Btn(RetroPad.START, "START", pill = true))
+    }
+    private val buttons = face + meta
     private var dx = 0f; private var dy = 0f; private var dr = 0f
     private var menuRect = RectF()
     private var mask = 0
@@ -35,11 +42,13 @@ class ControlsView(ctx: Context, private val onMask: (Int) -> Unit, private val 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         val u = min(w, h).toFloat()
         dr = u * 0.17f; dx = u * 0.06f + dr * 1.1f; dy = h - dr * 1.25f
-        val a = buttons[0]; val b = buttons[1]
-        a.r = u * 0.075f; b.r = a.r
-        a.cx = w - a.r * 1.6f; a.cy = h - dr * 1.5f
-        b.cx = a.cx - a.r * 2.5f; b.cy = a.cy + a.r * 0.9f
-        val sel = buttons[2]; val st = buttons[3]
+        val r = u * (if (face.size > 2) 0.068f else 0.075f)
+        face.forEachIndexed { i, b ->
+            b.r = r
+            b.cx = w - r * 1.5f - i * r * 2.4f
+            b.cy = h - dr * 1.5f + (if (i % 2 == 1) r * 0.9f else 0f)
+        }
+        val sel = meta[0]; val st = meta[1]
         sel.r = u * 0.05f; st.r = sel.r
         sel.cx = w / 2f - sel.r * 1.6f; st.cx = w / 2f + st.r * 1.6f
         sel.cy = h - sel.r * 1.2f; st.cy = sel.cy
@@ -50,7 +59,7 @@ class ControlsView(ctx: Context, private val onMask: (Int) -> Unit, private val 
 
     override fun onDraw(c: Canvas) {
         val alpha = (opacity * 255).toInt()
-        fun col(pressed: Boolean) = if (pressed) Color.argb(alpha, 229, 72, 77) else Color.argb(alpha / 2, 255, 255, 255)
+        fun col(pressed: Boolean) = if (pressed) Color.argb(alpha, 229, 72, 77) else Color.argb(alpha * 3 / 4, 24, 24, 28)  // dark fill stays visible on bright scenes
         stroke.color = Color.argb(alpha, 255, 255, 255); text.color = Color.argb(alpha, 255, 255, 255)
         // D-pad
         val dirs = listOf(RetroPad.UP to (0f to -1f), RetroPad.DOWN to (0f to 1f), RetroPad.LEFT to (-1f to 0f), RetroPad.RIGHT to (1f to 0f))
@@ -59,15 +68,16 @@ class ControlsView(ctx: Context, private val onMask: (Int) -> Unit, private val 
             fill.color = col(mask and RetroPad.bit(id) != 0)
             val cx = dx + v.first * dr * 0.62f; val cy = dy + v.second * dr * 0.62f
             c.drawRoundRect(cx - arm, cy - arm, cx + arm, cy + arm, arm * 0.3f, arm * 0.3f, fill)
+            c.drawRoundRect(cx - arm, cy - arm, cx + arm, cy + arm, arm * 0.3f, arm * 0.3f, stroke)
         }
         c.drawCircle(dx, dy, dr, stroke)
         for (b in buttons) {
             fill.color = col(mask and RetroPad.bit(b.id) != 0)
-            if (b.pill) c.drawRoundRect(b.cx - b.r * 1.4f, b.cy - b.r * 0.5f, b.cx + b.r * 1.4f, b.cy + b.r * 0.5f, b.r, b.r, fill)
+            if (b.pill) { c.drawRoundRect(b.cx - b.r * 1.4f, b.cy - b.r * 0.5f, b.cx + b.r * 1.4f, b.cy + b.r * 0.5f, b.r, b.r, fill); c.drawRoundRect(b.cx - b.r * 1.4f, b.cy - b.r * 0.5f, b.cx + b.r * 1.4f, b.cy + b.r * 0.5f, b.r, b.r, stroke) }
             else { c.drawCircle(b.cx, b.cy, b.r, fill); c.drawCircle(b.cx, b.cy, b.r, stroke) }
             c.drawText(b.label, b.cx, b.cy + text.textSize / 3, text)
         }
-        fill.color = Color.argb(alpha / 2, 255, 255, 255)
+        fill.color = Color.argb(alpha * 3 / 4, 24, 24, 28)
         c.drawRoundRect(menuRect, 12f, 12f, fill)
         c.drawText("MENU", menuRect.centerX(), menuRect.centerY() + text.textSize / 3, text)
     }

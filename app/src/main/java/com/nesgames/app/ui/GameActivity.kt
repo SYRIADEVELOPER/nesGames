@@ -78,14 +78,16 @@ class GameActivity : ComponentActivity() {
                 override fun onDrawFrame(g: GL10?) = NativeBridge.nativeDrawFrame()   // vsync-paced by EGL swap
             })
         }
-        controls = ControlsView(this, { touchMask = it; pushInput() }, { showMenu() })
+        controls = ControlsView(this, gameSystem(), { touchMask = it; pushInput() }, { showMenu() })
         setContentView(FrameLayout(this).apply { addView(gl); addView(controls) })
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) { override fun handleOnBackPressed() = showMenu() })
         lifecycleScope.launch { load() }
     }
 
+    private fun gameSystem() = runCatching { GameSystem.valueOf(intent.getStringExtra(EXTRA_SYSTEM) ?: "NES") }.getOrDefault(GameSystem.NES)
+
     private suspend fun load() {
-        val system = runCatching { GameSystem.valueOf(intent.getStringExtra(EXTRA_SYSTEM) ?: "NES") }.getOrDefault(GameSystem.NES)
+        val system = gameSystem()
         val corePath = Cores.corePath(this, system) ?: return fail("No emulator core is bundled for ${system.label}.")
         val result = withContext(Dispatchers.IO) {
             runCatching {
@@ -107,7 +109,7 @@ class GameActivity : ComponentActivity() {
             }.getOrElse { it.message ?: "Could not read the ROM" }
         }
         if (result != null) return fail(result)
-        NativeBridge.nativeSetIntegerScale(Settings(applicationContext).integerScale())
+        NativeBridge.nativeSetScaleMode(Settings(applicationContext).screenMode())
         loaded = true
         Log.i(QA_TAG, "BOOT_OK id=$gameId fps=${NativeBridge.nativeGetFps()}")
         ui.post(qaTick)
@@ -127,7 +129,7 @@ class GameActivity : ComponentActivity() {
         if (!loaded || menuOpen) return
         menuOpen = true
         NativeBridge.nativeSetPaused(true)
-        val items = arrayOf("Resume", "Save state", "Load state", "Restart", if (controls.alpha > 0f) "Hide touch controls" else "Show touch controls", "Toggle integer scaling", "Exit to library")
+        val items = arrayOf("Resume", "Save state", "Load state", "Restart", if (controls.alpha > 0f) "Hide touch controls" else "Show touch controls", "Screen: full screen / original aspect / integer", "Exit to library")
         AlertDialog.Builder(this).setTitle("Paused").setItems(items) { _, which ->
             when (which) {
                 1 -> toast(if (NativeBridge.nativeSaveState(statePath(1))) "State saved" else "Save failed")
@@ -135,7 +137,8 @@ class GameActivity : ComponentActivity() {
                 3 -> NativeBridge.nativeReset()
                 4 -> controls.alpha = if (controls.alpha > 0f) 0f else 1f
                 5 -> lifecycleScope.launch {
-                    val s = Settings(applicationContext); val v = !s.integerScale(); s.setIntegerScale(v); NativeBridge.nativeSetIntegerScale(v)
+                    val s = Settings(applicationContext); val v = (s.screenMode() + 1) % 3; s.setScreenMode(v); NativeBridge.nativeSetScaleMode(v)
+                    toast(arrayOf("Original aspect", "Integer scale", "Full screen")[v])
                 }
                 6 -> { finish(); return@setItems }
             }
