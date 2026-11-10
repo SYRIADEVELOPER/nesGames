@@ -26,6 +26,7 @@ import com.nesgames.app.library.Game
 import com.nesgames.app.library.GameSystem
 import com.nesgames.app.library.LibraryScanner
 import com.nesgames.app.library.Settings
+import com.nesgames.app.library.SaveSlots
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -37,7 +38,7 @@ import javax.microedition.khronos.opengles.GL10
 class GameActivity : ComponentActivity() {
     companion object {
         const val EXTRA_URI = "uri"; const val EXTRA_ENTRY = "entry"; const val EXTRA_NAME = "name"; const val EXTRA_SYSTEM = "system"
-        const val EXTRA_ID = "game_id"; const val EXTRA_DIR = "dir"; const val EXTRA_DISC_FILES = "disc_files"
+        const val EXTRA_ID = "game_id"; const val EXTRA_RESUME = "resume"; const val EXTRA_DIR = "dir"; const val EXTRA_DISC_FILES = "disc_files"
         /** Debug builds only: absolute path of a ROM inside this app's private storage, for adb QA runs. */
         const val EXTRA_TEST_FILE = "test_rom_file"
         const val QA_TAG = "nesGamesQA"
@@ -138,16 +139,21 @@ class GameActivity : ComponentActivity() {
                     val g = Game("", name, name, system, Uri.parse(intent.getStringExtra(EXTRA_URI)), intent.getStringExtra(EXTRA_ENTRY), 0)
                     name to LibraryScanner.loadRom(this@GameActivity, g)
                 }
-                gameId = MessageDigest.getInstance("SHA-1").digest(if (bytes.isEmpty()) name.toByteArray() else bytes).joinToString("") { "%02x".format(it) }.take(16)
+                gameId = intent.getStringExtra(EXTRA_ID)?.let { SaveSlots.keyFor(it) }
+                    ?: MessageDigest.getInstance("SHA-1").digest(if (bytes.isEmpty()) name.toByteArray() else bytes).joinToString("") { "%02x".format(it) }.take(20)
                 val sys = File(filesDir, "system").apply { mkdirs() }
-                val saves = File(filesDir, "saves").apply { mkdirs() }
-                File(filesDir, "states").mkdirs()
-                NativeBridge.nativeLoad(corePath, name, bytes, sys.path, saves.path, File(saves, "$gameId.srm").path, cacheDir.path)
+                val saves = SaveSlots.dir(this@GameActivity, gameId)
+                NativeBridge.nativeLoad(corePath, name, bytes, sys.path, saves.path, SaveSlots.sram(this@GameActivity, gameId).path, cacheDir.path)
             }.getOrElse { it.message ?: "Could not read the ROM" }
         }
         if (result != null) return fail(result)
         NativeBridge.nativeSetScaleMode(Settings(applicationContext).screenMode())
         loaded = true
+        if (intent.getBooleanExtra(EXTRA_RESUME, false) && SaveSlots.exists(this, gameId, SaveSlots.AUTO)) {
+            val ok = NativeBridge.nativeLoadState(SaveSlots.state(this, gameId, SaveSlots.AUTO).path)
+            Log.i(QA_TAG, "RESUME ${if (ok) "OK" else "FAILED"}")
+            toast(if (ok) "Continuing where you left off" else "Could not restore the auto-save")
+        }
         Log.i(QA_TAG, "BOOT_OK id=$gameId fps=${NativeBridge.nativeGetFps()}")
         ui.post(qaTick)
     }
@@ -160,17 +166,73 @@ class GameActivity : ComponentActivity() {
 
     private fun pushInput() { if (loaded) NativeBridge.nativeSetInput(0, touchMask or padMask) }
 
-    private fun statePath(slot: Int) = File(File(filesDir, "states"), "$gameId.state$slot").path
+    /** Writes a save state plus a screenshot of the current frame. Emulation must be paused. */
+    private fun saveSlot(slot: Int): Boolean {
+        val ok = NativeBridge.nativeSaveState(SaveSlots.state(this, gameId, slot).path)
+        if (ok) NativeBridge.nativeCopyFrame()?.let { f ->
+            runCatching {
+                val bmp = android.graphics.Bitmap.createBitmap(f.copyOfRange(2, f.size), f[0], f[1], android.graphics.Bitmap.Config.ARGB_8888)
+                SaveSlots.thumb(this, gameId, slot).outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
+            }
+        }
+        Log.i(QA_TAG, "SAVE slot=$slot ${if (ok) "OK" else "FAILED"}")
+        return ok
+    }
+
+    /** Slot chooser: thumbnail + time per slot. Saving to a used slot asks before overwriting. */
+    private fun showSlots(saving: Boolean) {
+        menuOpen = true; NativeBridge.nativeSetPaused(true)   // stay paused while choosing
+        val slots = (if (saving) SaveSlots.MANUAL else listOf(SaveSlots.AUTO) + SaveSlots.MANUAL).toList()
+        val dp = resources.displayMetrics.density
+        val adapter = object : android.widget.BaseAdapter() {
+            override fun getCount() = slots.size
+            override fun getItem(p: Int) = slots[p]
+            override fun getItemId(p: Int) = p.toLong()
+            override fun getView(p: Int, v: android.view.View?, parent: android.view.ViewGroup?): android.view.View {
+                val slot = slots[p]
+                val f = SaveSlots.state(this@GameActivity, gameId, slot)
+                val row = android.widget.LinearLayout(this@GameActivity).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL; setPadding((20 * dp).toInt(), (10 * dp).toInt(), (20 * dp).toInt(), (10 * dp).toInt())
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                val img = android.widget.ImageView(this@GameActivity).apply {
+                    layoutParams = android.widget.LinearLayout.LayoutParams((112 * dp).toInt(), (84 * dp).toInt())
+                    scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                    setBackgroundColor(0xFF202020.toInt())
+                    SaveSlots.thumb(this@GameActivity, gameId, slot).takeIf { it.exists() && f.exists() }?.let { setImageURI(Uri.fromFile(it)) }
+                }
+                val label = if (slot == SaveSlots.AUTO) "Auto-save" else "Slot $slot"
+                val txt = android.widget.TextView(this@GameActivity).apply {
+                    text = if (f.length() > 0) "$label\n${SaveSlots.ago(f.lastModified())}" else "$label\nEmpty"
+                    textSize = 16f; setPadding((16 * dp).toInt(), 0, 0, 0)
+                }
+                row.addView(img); row.addView(txt)
+                return row
+            }
+        }
+        AlertDialog.Builder(this).setTitle(if (saving) "Save game" else "Load game").setAdapter(adapter) { _, which ->
+            val slot = slots[which]
+            if (saving) {
+                if (SaveSlots.exists(this, gameId, slot))
+                    AlertDialog.Builder(this).setMessage("Overwrite slot $slot?").setNegativeButton("Cancel", null)
+                        .setPositiveButton("Overwrite") { _, _ -> toast(if (saveSlot(slot)) "Saved to slot $slot" else "Save failed") }.show()
+                else toast(if (saveSlot(slot)) "Saved to slot $slot" else "Save failed")
+            } else {
+                if (!SaveSlots.exists(this, gameId, slot)) toast("This slot is empty")
+                else toast(if (NativeBridge.nativeLoadState(SaveSlots.state(this, gameId, slot).path)) "Game loaded" else "Load failed")
+            }
+        }.setNegativeButton("Back", null).setOnDismissListener { menuOpen = false; NativeBridge.nativeSetPaused(false) }.show()
+    }
 
     private fun showMenu() {
         if (!loaded || menuOpen) return
         menuOpen = true
         NativeBridge.nativeSetPaused(true)
-        val items = arrayOf("Resume", "Save state", "Load state", "Restart", if (controls.alpha > 0f) "Hide touch controls" else "Show touch controls", "Screen: full screen / original aspect / integer", "Exit to library")
+        val items = arrayOf("Resume", "Save game…", "Load game…", "Restart", if (controls.alpha > 0f) "Hide touch controls" else "Show touch controls", "Screen: full screen / original aspect / integer", "Exit to library")
         AlertDialog.Builder(this).setTitle("Paused").setItems(items) { _, which ->
             when (which) {
-                1 -> toast(if (NativeBridge.nativeSaveState(statePath(1))) "State saved" else "Save failed")
-                2 -> toast(if (File(statePath(1)).exists() && NativeBridge.nativeLoadState(statePath(1))) "State loaded" else "No saved state")
+                1 -> { showSlots(saving = true); return@setItems }
+                2 -> { showSlots(saving = false); return@setItems }
                 3 -> NativeBridge.nativeReset()
                 4 -> controls.alpha = if (controls.alpha > 0f) 0f else 1f
                 5 -> lifecycleScope.launch {
@@ -224,7 +286,11 @@ class GameActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         gl.onPause()
-        if (loaded) { NativeBridge.nativeSetPaused(true); NativeBridge.nativeSaveSram() }
+        if (loaded) {
+            NativeBridge.nativeSetPaused(true)
+            NativeBridge.nativeSaveSram()
+            saveSlot(SaveSlots.AUTO)   // auto-save powers "Continue" on the home screen
+        }
     }
 
     override fun onResume() {

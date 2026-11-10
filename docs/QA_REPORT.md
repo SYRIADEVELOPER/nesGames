@@ -59,3 +59,14 @@ Same device. Screenshots are in docs/qa/.
 | Unit tests | PASS 17/17 | |
 | Gamepad/D-pad navigation on the home screen | NOT TESTED | no controller attached |
 | Gameplay-snapshot fallback cover | NOT TESTED | needs 20+ s of play of a game without box art |
+
+## Save system (2026-11-10)
+Every game, whatever the console, gets its own folder `files/saves/<game key>/` containing:
+in-game save (battery RAM / PS1 memory card), auto-save slot 0 (written on exit or backgrounding, used by "Continue"), and manual slots 1–4, each with a screenshot.
+
+| Test | Result | Evidence |
+|---|---|---|
+| Save to slot 1 from the pause menu (Tiny Toon) | PASS | "Saved to slot 1" toast (qa/save_2_ingame.png); slot1.state 1,036,288 B + slot1.png on disk |
+| Slot chooser shows thumbnail and time | PASS (visual) | qa/save_1_slots.png |
+| Auto-save on exit → "Continue" on home → resume | NOT YET VERIFIED | the test was interrupted while the user was playing on the device |
+| Load from a slot | NOT YET VERIFIED | |

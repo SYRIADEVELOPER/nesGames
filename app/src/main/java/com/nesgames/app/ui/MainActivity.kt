@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
         var query by remember { mutableStateOf("") }
         var searching by remember { mutableStateOf(false) }
         var launching by remember { mutableStateOf<Game?>(null) }
+        var resume by remember { mutableStateOf(false) }
         var splash by remember { mutableStateOf(true) }
         var coverVersion by remember { mutableIntStateOf(0) }
         val scope = rememberCoroutineScope()
@@ -149,13 +150,14 @@ class MainActivity : ComponentActivity() {
         val sel = (selByTab[tab] ?: 0).coerceIn(0, (shown.size - 1).coerceAtLeast(0))
         val focused = shown.getOrNull(sel)
 
-        fun launch(g: Game) { if (launching == null) launching = g }
+        fun launch(g: Game, cont: Boolean = false) { if (launching == null) { resume = cont; launching = g } }
         LaunchedEffect(launching) {
             val g = launching ?: return@LaunchedEffect
             delay(380)   // let the zoom-in animation play
             startActivity(Intent(this@MainActivity, GameActivity::class.java)
                 .putExtra(GameActivity.EXTRA_URI, g.uri.toString())
                 .putExtra(GameActivity.EXTRA_ID, g.id)
+                .putExtra(GameActivity.EXTRA_RESUME, resume)
                 .putExtra(GameActivity.EXTRA_ENTRY, g.zipEntry)
                 .putExtra(GameActivity.EXTRA_NAME, g.fileName)
                 .putExtra(GameActivity.EXTRA_SYSTEM, g.system.name)
@@ -205,7 +207,7 @@ class MainActivity : ComponentActivity() {
                     } else {
                         GameRow(shown, sel, launching, coverVersion, onSelect = { selByTab[tab] = it }, onLaunch = ::launch)
                         Spacer(Modifier.height(22.dp))
-                        focused?.let { Details(it, onPlay = { launch(it) }) }
+                        focused?.let { Details(it, coverVersion, onPlay = { launch(it) }, onContinue = { launch(it, cont = true) }) }
                     }
                 }
             }
@@ -310,7 +312,10 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun Details(g: Game, onPlay: () -> Unit) {
+    private fun Details(g: Game, version: Int, onPlay: () -> Unit, onContinue: () -> Unit) {
+        val autoSave by produceState<Long?>(null, g.id, version) {
+            value = withContext(Dispatchers.IO) { SaveSlots.state(applicationContext, SaveSlots.keyFor(g.id), SaveSlots.AUTO).takeIf { it.length() > 0 }?.lastModified() }
+        }
         AnimatedContent(g, transitionSpec = {
             (fadeIn(tween(260)) + slideInHorizontally(tween(260)) { it / 12 }) togetherWith fadeOut(tween(150))
         }, label = "details") { game ->
@@ -319,10 +324,24 @@ class MainActivity : ComponentActivity() {
                 Text("${game.system.label}  ·  ${"%.1f".format(game.size / 1048576.0)} MB", color = Color.White.copy(0.7f), fontSize = 15.sp)
                 Spacer(Modifier.height(16.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = onPlay, shape = RoundedCornerShape(28.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
-                        contentPadding = PaddingValues(horizontal = 34.dp, vertical = 12.dp)) {
-                        Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Play", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    val saved = autoSave
+                    if (saved != null) {
+                        Button(onClick = onContinue, shape = RoundedCornerShape(28.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
+                            contentPadding = PaddingValues(horizontal = 30.dp, vertical = 12.dp)) {
+                            Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp))
+                            Column { Text("Continue", fontSize = 18.sp, fontWeight = FontWeight.Bold); Text(SaveSlots.ago(saved), fontSize = 11.sp) }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        OutlinedButton(onClick = onPlay, shape = RoundedCornerShape(28.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp)) { Text("Start new", fontSize = 16.sp) }
+                    } else {
+                        Button(onClick = onPlay, shape = RoundedCornerShape(28.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
+                            contentPadding = PaddingValues(horizontal = 34.dp, vertical = 12.dp)) {
+                            Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Play", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                     Spacer(Modifier.width(18.dp))
                     Text("Controls: ${controlsFor(game.system)}", color = Color.White.copy(0.75f), fontSize = 14.sp)
