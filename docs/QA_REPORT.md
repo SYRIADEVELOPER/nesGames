@@ -37,3 +37,13 @@ Same device. Screenshots are in docs/qa/.
 | C button jumps | PASS | md_5_fullscreen_jump.png |
 | Full-screen mode (default) | PASS | the picture fills the whole 3120x1440 display |
 | Switching core NES → MD in one process | PASS | NES test ROM then Tiny Toon launched in the same process with no restart |
+
+## PlayStation: Metal Slug X (USA), user-supplied CUE/BIN
+| Test | Result | Evidence |
+|---|---|---|
+| Disc boot with HLE BIOS (no BIOS file) | PASS | main menu renders (qa/ps1_1_boot.png) |
+| Timing / audio | PASS | 60 fps NTSC; ~44.1k audio frames/s; underruns flat after startup |
+| Menu → Arcade Mission → gameplay | PASS | qa/ps1_4.png |
+| □ fires | PASS | qa/ps1_5_shoot.png |
+| Reading discs from Android/data via a native path | FAIL → worked around | the core got "Permission denied"; the disc now loads from app-internal storage |
+| Open issue | — | D-pad Right drew highlighted in ps1_5 while the logged mask was 0; needs investigation |

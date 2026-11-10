@@ -23,13 +23,16 @@ class ControlsView(ctx: Context, system: GameSystem, private val onMask: (Int) -
     // Face buttons listed right-to-left. Mega Drive mapping follows Genesis Plus GX: Y=A, B=B, A=C.
     private val face = when (system) {
         GameSystem.MD -> listOf(Btn(RetroPad.A, "C"), Btn(RetroPad.B, "B"), Btn(RetroPad.Y, "A"))
+        // PlayStation (libretro RetroPad): A=Circle, B=Cross, Y=Square, X=Triangle. Drawn as a diamond.
+        GameSystem.PS1 -> listOf(Btn(RetroPad.A, "○"), Btn(RetroPad.B, "✕"), Btn(RetroPad.Y, "□"), Btn(RetroPad.X, "△"))
         else -> listOf(Btn(RetroPad.A, "A"), Btn(RetroPad.B, "B"))
     }
     private val meta = when (system) {
         GameSystem.MD -> listOf(Btn(RetroPad.SELECT, "MODE", pill = true), Btn(RetroPad.START, "START", pill = true))
         else -> listOf(Btn(RetroPad.SELECT, "SELECT", pill = true), Btn(RetroPad.START, "START", pill = true))
     }
-    private val buttons = face + meta
+    private val shoulders = if (system == GameSystem.PS1) listOf(Btn(RetroPad.L, "L1", pill = true), Btn(RetroPad.R, "R1", pill = true)) else emptyList()
+    private val buttons = face + meta + shoulders
     private var dx = 0f; private var dy = 0f; private var dr = 0f
     private var menuRect = RectF()
     private var mask = 0
@@ -43,10 +46,19 @@ class ControlsView(ctx: Context, system: GameSystem, private val onMask: (Int) -
         val u = min(w, h).toFloat()
         dr = u * 0.17f; dx = u * 0.06f + dr * 1.1f; dy = h - dr * 1.25f
         val r = u * (if (face.size > 2) 0.068f else 0.075f)
-        face.forEachIndexed { i, b ->
+        if (face.size == 4) {   // diamond: right, bottom, left, top
+            val cx = w - r * 3.6f; val cy = h - dr * 1.25f; val o = r * 2.05f
+            val pos = listOf(o to 0f, 0f to o, -o to 0f, 0f to -o)
+            face.forEachIndexed { i, b -> b.r = r; b.cx = cx + pos[i].first; b.cy = cy + pos[i].second }
+        } else face.forEachIndexed { i, b ->
             b.r = r
             b.cx = w - r * 1.5f - i * r * 2.4f
             b.cy = h - dr * 1.5f + (if (i % 2 == 1) r * 0.9f else 0f)
+        }
+        if (shoulders.isNotEmpty()) {
+            val sr = u * 0.06f
+            shoulders[0].apply { this.r = sr; cx = sr * 2.2f; cy = u * 0.2f }
+            shoulders[1].apply { this.r = sr; cx = w - sr * 2.2f; cy = u * 0.2f }
         }
         val sel = meta[0]; val st = meta[1]
         sel.r = u * 0.05f; st.r = sel.r

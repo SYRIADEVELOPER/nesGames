@@ -95,13 +95,14 @@ class GameActivity : ComponentActivity() {
                 val (name, bytes) = if (BuildConfig.DEBUG && testFile != null) {
                     val f = File(testFile).canonicalFile
                     require(f.path.startsWith(filesDir.canonicalPath) || f.path.startsWith(getExternalFilesDir(null)!!.canonicalPath)) { "test ROM outside app storage" }
-                    f.name to f.readBytes()
+                    // discs (cue/chd/bin) stay on disk; the core opens the cue and its referenced tracks
+                    if (f.extension.lowercase() in setOf("cue", "chd", "bin", "iso", "pbp")) f.path to ByteArray(0) else f.name to f.readBytes()
                 } else {
                     val name = intent.getStringExtra(EXTRA_NAME) ?: "game.nes"
                     val g = Game("", name, name, system, Uri.parse(intent.getStringExtra(EXTRA_URI)), intent.getStringExtra(EXTRA_ENTRY), 0)
                     name to LibraryScanner.loadRom(this@GameActivity, g)
                 }
-                gameId = MessageDigest.getInstance("SHA-1").digest(bytes).joinToString("") { "%02x".format(it) }.take(16)
+                gameId = MessageDigest.getInstance("SHA-1").digest(if (bytes.isEmpty()) name.toByteArray() else bytes).joinToString("") { "%02x".format(it) }.take(16)
                 val sys = File(filesDir, "system").apply { mkdirs() }
                 val saves = File(filesDir, "saves").apply { mkdirs() }
                 File(filesDir, "states").mkdirs()

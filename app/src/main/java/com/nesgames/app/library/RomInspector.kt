@@ -7,6 +7,7 @@ enum class GameSystem(val label: String, val short: String) {
     GBA("Game Boy Advance", "GBA"),
     SNES("Super Nintendo", "SNES"),
     MD("Mega Drive / Genesis", "MD"),
+    PS1("PlayStation", "PS1"),
 }
 
 /**

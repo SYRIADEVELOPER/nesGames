@@ -154,6 +154,7 @@ bool environment(unsigned cmd, void *data) {
         case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
             return true;
         default:
+            if ((cmd & ~RETRO_ENVIRONMENT_EXPERIMENTAL) != RETRO_ENVIRONMENT_GET_VARIABLE) LOGI("env cmd %u not handled", cmd);
             return false;   // GET_VARIABLE etc.: core falls back to its documented defaults
     }
 }
@@ -409,7 +410,12 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_nesgames_app_emu_NativeBridge_nati
     c.get_system_info(&si);
     std::string name = jstr(env, romName);
     retro_game_info gi{};
-    if (si.need_fullpath) {   // core wants a real file: write to app-private temp dir
+    if (g.romData.empty()) {  // file-backed content (e.g. CUE+BIN discs): pass the path through
+        gi.path = name.c_str();
+        if (!si.need_fullpath && !readFile(name, g.romData, 64u << 20)) { c.deinit(); return env->NewStringUTF("cannot read content file"); }
+        gi.data = g.romData.empty() ? nullptr : g.romData.data();
+        gi.size = g.romData.size();
+    } else if (si.need_fullpath) {   // core wants a real file: write to app-private temp dir
         g.tempRomPath = jstr(env, tempDir) + "/" + name;
         if (!writeFile(g.tempRomPath, g.romData.data(), g.romData.size())) { c.deinit(); return env->NewStringUTF("cannot stage ROM"); }
         gi.path = g.tempRomPath.c_str();
@@ -418,6 +424,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_nesgames_app_emu_NativeBridge_nati
         gi.data = g.romData.data();
         gi.size = g.romData.size();
     }
+    LOGI("load_game path=%s need_fullpath=%d size=%zu lib=%s", gi.path ? gi.path : "(null)", si.need_fullpath, gi.size, si.library_name);
     if (!c.load_game(&gi)) { c.deinit(); return env->NewStringUTF("The core rejected this ROM (unsupported or corrupt)"); }
     g.loaded = true;
     retro_system_av_info av{};

@@ -7,7 +7,7 @@
 | GBA | .gba | 0x96 @0xB2 + ARM branch | — | Detected only (M4) |
 | Mega Drive | .md/.gen | "SEGA" @0x100 | Genesis Plus GX | Playable (3-button pad: A/B/C/START/MODE) |
 | SNES | .sfc/.smc | needs internal-header check | — | M5 |
-| PS1 | .cue/.chd | — | — | M6 |
+| PS1 | .cue + .bin | (library detection pending) | PCSX ReARMed (HLE BIOS) | Plays from app storage; launching from the library not wired yet |
 
 The extension alone never counts as proof. Zips with more than one recognised ROM (for example arcade sets) are not listed.
 FDS disk images need `disksys.rom` in `Download/nesGames/BIOS/` (BIOS manager comes in M5).
