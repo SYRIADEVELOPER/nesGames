@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: lets adb launch GameActivity with a QA test ROM. Release keeps exported=false. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <activity android:name=".ui.GameActivity" android:exported="true" tools:replace="android:exported" />
+    </application>
+</manifest>

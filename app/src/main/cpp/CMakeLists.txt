@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(nesgames CXX)
+set(CMAKE_CXX_STANDARD 17)
+add_library(nesgames SHARED frontend.cpp)
+target_compile_options(nesgames PRIVATE -Wall -O2 -fno-exceptions)
+target_link_libraries(nesgames android log GLESv2 aaudio dl)
+target_link_options(nesgames PRIVATE "-Wl,-z,max-page-size=16384")
