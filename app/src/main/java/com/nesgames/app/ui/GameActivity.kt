@@ -37,6 +37,7 @@ import javax.microedition.khronos.opengles.GL10
 class GameActivity : ComponentActivity() {
     companion object {
         const val EXTRA_URI = "uri"; const val EXTRA_ENTRY = "entry"; const val EXTRA_NAME = "name"; const val EXTRA_SYSTEM = "system"
+        const val EXTRA_ID = "game_id"; const val EXTRA_DIR = "dir"; const val EXTRA_DISC_FILES = "disc_files"
         /** Debug builds only: absolute path of a ROM inside this app's private storage, for adb QA runs. */
         const val EXTRA_TEST_FILE = "test_rom_file"
         const val QA_TAG = "nesGamesQA"
@@ -51,8 +52,28 @@ class GameActivity : ComponentActivity() {
     private var gameId = "game"
     private val ui = Handler(Looper.getMainLooper())
 
+    private var playSeconds = 0
+    private var snapshotTries = 0
+
+    /** Fallback cover: after ~20 s of play, save a frame that is not a blank/loading screen. */
+    private fun maybeSnapshot() {
+        val id = intent.getStringExtra(EXTRA_ID) ?: return
+        if (menuOpen || snapshotTries >= 4 || playSeconds < 20 || playSeconds % 10 != 0) return
+        if (com.nesgames.app.library.Covers.bestFile(this, id) != null) { snapshotTries = 99; return }
+        snapshotTries++
+        val f = NativeBridge.nativeCopyFrame() ?: return
+        val w = f[0]; val h = f[1]
+        val px = f.copyOfRange(2, f.size)
+        val distinct = HashSet<Int>()
+        var i = 0; while (i < px.size && distinct.size < 24) { distinct += px[i]; i += 97 }
+        if (distinct.size < 24) return   // mostly uniform: probably a loading/black screen, try later
+        lifecycleScope.launch(Dispatchers.IO) { runCatching { com.nesgames.app.library.Covers.saveSnapshot(this@GameActivity, id, px, w, h) } }
+        snapshotTries = 99
+    }
+
     private val qaTick = object : Runnable {
         override fun run() {
+            if (loaded && !menuOpen) { playSeconds++; maybeSnapshot() }
             if (loaded) {
                 val s = NativeBridge.nativeGetStats()
                 Log.i(QA_TAG, "frames=${s[0]} video=${s[1]} audioFrames=${s[2]} underruns=${s[3]} hash=%08x center=%08x size=${s[6]}x${s[7]} mask=${touchMask or padMask}"
@@ -97,6 +118,21 @@ class GameActivity : ComponentActivity() {
                     require(f.path.startsWith(filesDir.canonicalPath) || f.path.startsWith(getExternalFilesDir(null)!!.canonicalPath)) { "test ROM outside app storage" }
                     // discs (cue/chd/bin) stay on disk; the core opens the cue and its referenced tracks
                     if (f.extension.lowercase() in setOf("cue", "chd", "bin", "iso", "pbp")) f.path to ByteArray(0) else f.name to f.readBytes()
+                } else if (intent.getStringExtra(EXTRA_DIR) != null) {
+                    // CUE disc: copy cue + tracks into app storage once, then let the core open them by path
+                    val name = intent.getStringExtra(EXTRA_NAME) ?: "disc.cue"
+                    val progress = withContext(Dispatchers.Main) {
+                        AlertDialog.Builder(this@GameActivity).setTitle("Preparing disc").setMessage("First launch only…").setCancelable(false).show()
+                    }
+                    try {
+                        var last = -1
+                        val cue = LibraryScanner.importDisc(this@GameActivity, Uri.parse(intent.getStringExtra(EXTRA_URI)),
+                            Uri.parse(intent.getStringExtra(EXTRA_DIR)), name, intent.getStringArrayExtra(EXTRA_DISC_FILES)?.toList().orEmpty()) { p ->
+                            val pct = (p * 100).toInt()
+                            if (pct != last) { last = pct; ui.post { progress.setMessage("Copying disc to app storage: $pct%") } }
+                        }
+                        cue.path to ByteArray(0)
+                    } finally { withContext(Dispatchers.Main) { progress.dismiss() } }
                 } else {
                     val name = intent.getStringExtra(EXTRA_NAME) ?: "game.nes"
                     val g = Game("", name, name, system, Uri.parse(intent.getStringExtra(EXTRA_URI)), intent.getStringExtra(EXTRA_ENTRY), 0)

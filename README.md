@@ -7,7 +7,7 @@ No ROMs are bundled. The app uses no network, telemetry or background services.
 | Milestone | State |
 |---|---|
 | M1 NES runs real ROMs | **Done, verified on a Galaxy S24 Ultra (Android 14)**. See docs/QA_REPORT.md |
-| M2 Library + folder scanning | Partial: SAF picker, scanner, search and console filter work. Room DB, favorites and recents are not built yet |
+| M2 Library + folder scanning | Done: per-console folders auto-created, PS5-style home, automatic box art (libretro thumbnails), PS1 disc import. Favorites/recents not built yet |
 | M3 Touch controls + saving | Partial: multi-touch pad, SRAM and one save-state slot work. Layout editor, opacity setting and remapping are not built yet |
 | M5 Mega Drive | **Playable** (Genesis Plus GX). SNES not started |
 | M4, M6, M7 | Not started |

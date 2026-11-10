@@ -555,3 +555,20 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeD
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glViewport(0, 0, g.viewW, g.viewH);
 }
+
+// Returns [w, h, pixels...] of the latest frame as 0xAARRGGBB (Android Bitmap order), or null.
+extern "C" JNIEXPORT jintArray JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeCopyFrame(JNIEnv *env, jobject) {
+    std::lock_guard<std::mutex> lk(g.videoMutex);
+    if (g.pending.empty() || !g.pw || !g.ph) return nullptr;
+    size_t n = (size_t) g.pw * g.ph;
+    std::vector<jint> out(n + 2);
+    out[0] = (jint) g.pw;
+    out[1] = (jint) g.ph;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t p = g.pending[i];   // stored as R | G<<8 | B<<16 | A<<24
+        out[i + 2] = (jint) ((p & 0xFF00FF00u) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF));
+    }
+    jintArray a = env->NewIntArray((jsize) out.size());
+    env->SetIntArrayRegion(a, 0, (jsize) out.size(), out.data());
+    return a;
+}

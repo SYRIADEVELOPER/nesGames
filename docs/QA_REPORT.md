@@ -47,3 +47,15 @@ Same device. Screenshots are in docs/qa/.
 | □ fires | PASS | qa/ps1_5_shoot.png |
 | Reading discs from Android/data via a native path | FAIL → worked around | the core got "Permission denied"; the disc now loads from app-internal storage |
 | Open issue | — | D-pad Right drew highlighted in ps1_5 while the logged mask was 0; needs investigation |
+
+## Library v2: per-console folders, PS5-style home, automatic covers (2026-11-10)
+| Test | Result | Evidence |
+|---|---|---|
+| Folder picker → console folders auto-created | PASS | Download/nesGames now holds BIOS, GBA, GameBoy, MegaDrive, NES, PS1, SNES |
+| Games found from their folders (NES / MegaDrive / PS1 CUE+BIN) | PASS | qa/ui_2_home.png: 3 games, correct systems |
+| Matching controls shown per game | PASS | Details panel and in-game layout per system |
+| Box art downloaded automatically | PASS | logcat nesGamesCovers: stored for Metal Slug X and Tiny Toon; 404 for the test cart (expected) → generated tile; qa/ui_4_covers.png |
+| PS1 launched from the library (one-time disc copy) | PASS | loaded files/discs/<id>/Metal Slug X (USA).cue, running at 60 fps |
+| Unit tests | PASS 17/17 | |
+| Gamepad/D-pad navigation on the home screen | NOT TESTED | no controller attached |
+| Gameplay-snapshot fallback cover | NOT TESTED | needs 20+ s of play of a game without box art |

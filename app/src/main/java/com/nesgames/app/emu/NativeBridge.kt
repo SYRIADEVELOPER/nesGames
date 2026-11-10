@@ -21,6 +21,8 @@ object NativeBridge {
     /** [frames, videoFrames, audioFrames, underruns, frameHash, centerPixelRGBA, width, height] */
     external fun nativeGetStats(): LongArray
     external fun nativeGetFps(): Double
+    /** [w, h, ARGB pixels...] of the latest frame, or null before the first frame. */
+    external fun nativeCopyFrame(): IntArray?
     external fun nativeSurfaceCreated()
     external fun nativeSurfaceChanged(w: Int, h: Int)
     external fun nativeDrawFrame()
