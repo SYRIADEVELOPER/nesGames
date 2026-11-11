@@ -16,11 +16,13 @@ object NativeBridge {
     external fun nativeSaveSram(): Boolean
     external fun nativeSaveState(path: String): Boolean
     external fun nativeLoadState(path: String): Boolean
-    /** 0 = original aspect, 1 = integer scale, 2 = full screen */
+    /** 0 = original aspect, 1 = integer scale, 2 = full screen, 3 = 4:3 */
     external fun nativeSetScaleMode(mode: Int)
-    /** [frames, videoFrames, audioFrames, underruns, frameHash, centerPixelRGBA, width, height] */
+    /** [frames, videoFrames, audioFrames, underruns, frameHash, centerPixelRGBA, width, height, framesWithInput] */
     external fun nativeGetStats(): LongArray
     external fun nativeGetFps(): Double
+    /** FNV hash of emulated system RAM, or -1 if the core does not expose it. */
+    external fun nativeRamHash(): Long
     /** [w, h, ARGB pixels...] of the latest frame, or null before the first frame. */
     external fun nativeCopyFrame(): IntArray?
     external fun nativeSurfaceCreated()

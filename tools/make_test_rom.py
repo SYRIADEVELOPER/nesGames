@@ -2,7 +2,8 @@
 """Builds nesgames_test.nes: an original, public-domain NROM test program written for nesGames QA.
 Behaviour: plays a constant ~440 Hz square wave; backdrop colour reflects controller 1:
   none=blue(0x21)  A=red(0x16)  B=green(0x2A)  other buttons=yellow(0x28).
-That gives machine-checkable evidence of video output, audio output and input handling."""
+A 16-bit frame counter at $10/$11 changes RAM every frame, so a restored save state is provable.
+That gives machine-checkable evidence of video output, audio output, input handling and state restore."""
 import sys
 
 code = bytearray(); labels = {}; fixups = []
@@ -24,6 +25,7 @@ label('loop'); emit(0x4C); absw('loop')
 
 label('nmi')
 emit(0x48)                                           # pha
+emit(0xE6, 0x10, 0xD0, 0x02, 0xE6, 0x11)                 # inc $10; bne +2; inc $11 -> 16-bit frame counter in RAM (save-state evidence)
 emit(0xA9, 0x01, 0x8D, 0x16, 0x40, 0xA9, 0x00, 0x8D, 0x16, 0x40)  # strobe pad
 emit(0xA2, 0x08)
 label('rd'); emit(0xAD, 0x16, 0x40, 0x4A, 0x26, 0x00, 0xCA, 0xD0); rel('rd')

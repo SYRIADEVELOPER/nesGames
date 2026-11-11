@@ -3,14 +3,16 @@
 Lightweight, offline Android multi-system emulator (package `com.nesgames.app`) built on native libretro cores.
 No ROMs are bundled. The app uses no network, telemetry or background services.
 
-## Status
-| Milestone | State |
+## Status (v0.2.0-phase2)
+| Area | State |
 |---|---|
-| M1 NES runs real ROMs | **Done, verified on a Galaxy S24 Ultra (Android 14)**. See docs/QA_REPORT.md |
-| M2 Library + folder scanning | Done: per-console folders auto-created, PS5-style home, automatic box art (libretro thumbnails), PS1 disc import. Favorites/recents not built yet |
-| M3 Touch controls + saving | Partial: multi-touch pad, SRAM and one save-state slot work. Layout editor, opacity setting and remapping are not built yet |
-| M5 Mega Drive | **Playable** (Genesis Plus GX). SNES not started |
-| M4, M6, M7 | Not started |
+| NES · Mega Drive · PlayStation | Playable on a Galaxy S24 Ultra |
+| Save system | 4 slots + auto-save + Continue, integrity-checked, verified on all three consoles |
+| Touch controller | Per-console layouts, editor (move / resize / opacity / D-pad gap), presets, haptics, gamepad remap |
+| Library | Room cache, incremental rescans, rename-safe, Recent and Favorites, Arabic + English |
+| GB/GBA/SNES, CHD, release build | Not started |
+
+See docs/QA_REPORT.md for evidence.
 
 ## Use
 1. Put your own ROM files in `Download/nesGames/` on the phone.

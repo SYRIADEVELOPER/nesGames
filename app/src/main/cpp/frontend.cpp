@@ -1,5 +1,6 @@
 // nesGames native libretro frontend: core loading, run loop, video (GLES2), audio (AAudio), input.
 #include <jni.h>
+#include <unistd.h>
 #include <dlfcn.h>
 #include <android/log.h>
 #include <aaudio/AAudio.h>
@@ -106,14 +107,14 @@ struct State {
     AudioRing ring;
 
     // QA statistics
-    std::atomic<int64_t> frames{0}, videoFrames{0}, audioFrames{0}, underruns{0};
+    std::atomic<int64_t> frames{0}, videoFrames{0}, audioFrames{0}, underruns{0}, inputFrames{0};
     std::atomic<uint32_t> lastHash{0}, centerPixel{0};
 
     // GL
     GLuint prog = 0, tex = 0;
     GLint locPos = -1, locUv = -1;
     int viewW = 1, viewH = 1, texW = 0, texH = 0;
-    int scaleMode = 2;   // 0 original aspect, 1 integer, 2 full screen (default)
+    int scaleMode = 2;   // 0 original aspect, 1 integer, 2 full screen (default), 3 forced 4:3
 } g;
 
 void coreLog(enum retro_log_level level, const char *fmt, ...) {
@@ -271,7 +272,9 @@ void emuLoop() {
         }
         {
             std::lock_guard<std::mutex> lk(g.coreMutex);
+            if (g.paused) continue;   // re-check under the lock: no frame may run once a pause is in effect
             g.core.run();
+            if (g.input[0].load(std::memory_order_relaxed)) g.inputFrames++;
         }
         g.frames++;
         double adj = 1.0;
@@ -322,7 +325,9 @@ bool writeFile(const std::string &path, const void *data, size_t size) {
     if (!f) return false;
     bool ok = fwrite(data, 1, size, f) == size;
     ok = (fflush(f) == 0) && ok;
+    ok = (fsync(fileno(f)) == 0) && ok;   // on disk before the rename makes it visible
     fclose(f);
+    if (!ok) { remove(tmp.c_str()); return false; }
     return ok && rename(tmp.c_str(), path.c_str()) == 0;   // atomic replace
 }
 
@@ -395,7 +400,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_nesgames_app_emu_NativeBridge_nati
     jsize n = env->GetArrayLength(rom);
     g.romData.resize((size_t) n);
     env->GetByteArrayRegion(rom, 0, n, (jbyte *) g.romData.data());
-    g.frames = g.videoFrames = g.audioFrames = g.underruns = 0;
+    g.frames = g.videoFrames = g.audioFrames = g.underruns = g.inputFrames = 0;
 
     std::lock_guard<std::mutex> lk(g.coreMutex);
     auto &c = g.core;
@@ -452,6 +457,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeU
 
 extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetPaused(JNIEnv *, jobject, jboolean p) {
     g.paused = p;
+    if (p) { std::lock_guard<std::mutex> lk(g.coreMutex); }   // wait for an in-flight frame: state is frozen when this returns
     if (g.stream) { if (p) AAudioStream_requestPause(g.stream); else AAudioStream_requestStart(g.stream); }
 }
 
@@ -476,16 +482,38 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nat
     if (!g.loaded) return false;
     std::vector<uint8_t> buf;
     if (!readFile(jstr(env, path), buf, 64u << 20)) return false;
-    return g.core.unserialize(buf.data(), buf.size());
+    size_t expect = g.core.serialize_size();
+    if (buf.empty() || buf.size() != expect) {   // truncated / foreign file: never hand it to the core
+        LOGE("state rejected: %zu bytes, core expects %zu", buf.size(), expect);
+        return false;
+    }
+    std::vector<uint8_t> backup(expect);
+    bool haveBackup = g.core.serialize(backup.data(), expect);
+    if (g.core.unserialize(buf.data(), buf.size())) return true;
+    LOGE("unserialize failed; rolling back");
+    if (haveBackup) g.core.unserialize(backup.data(), expect);
+    return false;
+}
+
+// FNV-1a of the emulated system RAM: QA evidence that a load restored the real game position.
+extern "C" JNIEXPORT jlong JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeRamHash(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lk(g.coreMutex);
+    if (!g.loaded) return -1;
+    size_t sz = g.core.get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
+    auto *p = (const uint8_t *) g.core.get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+    if (!sz || !p) return -1;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < sz; i++) { h ^= p[i]; h *= 16777619u; }
+    return (jlong) h;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetScaleMode(JNIEnv *, jobject, jint mode) { g.scaleMode = mode; }
 
 extern "C" JNIEXPORT jlongArray JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeGetStats(JNIEnv *env, jobject) {
-    jlong v[8] = {g.frames, g.videoFrames, g.audioFrames, g.underruns, (jlong) g.lastHash.load(),
-                  (jlong) g.centerPixel.load(), (jlong) g.pw, (jlong) g.ph};
-    jlongArray a = env->NewLongArray(8);
-    env->SetLongArrayRegion(a, 0, 8, v);
+    jlong v[9] = {g.frames, g.videoFrames, g.audioFrames, g.underruns, (jlong) g.lastHash.load(),
+                  (jlong) g.centerPixel.load(), (jlong) g.pw, (jlong) g.ph, g.inputFrames};
+    jlongArray a = env->NewLongArray(9);
+    env->SetLongArrayRegion(a, 0, 9, v);
     return a;
 }
 
@@ -537,6 +565,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeD
     float a = g.aspect;
     int w = g.viewW, h = (int) (g.viewW / a);
     if (h > g.viewH) { h = g.viewH; w = (int) (g.viewH * a); }
+    if (g.scaleMode == 3) {   // classic 4:3 TV shape
+        a = 4.f / 3.f;
+        w = g.viewW; h = (int) (g.viewW / a);
+        if (h > g.viewH) { h = g.viewH; w = (int) (g.viewH * a); }
+    }
     if (g.scaleMode == 2) { w = g.viewW; h = g.viewH; }
     else if (g.scaleMode == 1) {
         int s = std::max(1, std::min(g.viewW / g.texW, g.viewH / g.texH));

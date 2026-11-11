@@ -70,3 +70,77 @@ in-game save (battery RAM / PS1 memory card), auto-save slot 0 (written on exit 
 | Slot chooser shows thumbnail and time | PASS (visual) | qa/save_1_slots.png |
 | Auto-save on exit → "Continue" on home → resume | NOT YET VERIFIED | the test was interrupted while the user was playing on the device |
 | Load from a slot | NOT YET VERIFIED | |
+
+---
+
+# Phase 2 regression report: v0.2.0-phase2 (2026-11-11)
+
+Devices: **S24** = Samsung Galaxy S24 Ultra SM-S928B, Android 14, arm64 (real phone). **EMU** = Android 15 x86_64 emulator (sga_test), used for long scripted runs while the phone was in use.
+Method: `tools/qa.ps1` drives a debug-only QA broadcast channel. Save evidence = FNV hash of the emulated system RAM at save (H1), after 1.2 s more play (H2), and after load (H3). **PASS requires H3 = H1 and H2 ≠ H1**, i.e. the real game position came back, not just "load returned true".
+Test content: `tools/testroms/nesgames_test.nes` (own NROM program; it now keeps a 16-bit frame counter in RAM, SHA-256 a92cfe43…b5b4), plus the user's own Tiny Toon Adventures (MD) and Metal Slug X (PS1).
+Checkpoint before changes: git tag `phase1-checkpoint`; the user's saves were backed up on the phone to `files/saves_backup_phase2`.
+
+## Priority 1: save system
+| Test | NES | Mega Drive | PS1 |
+|---|---|---|---|
+| Slots 1–4 save → play on → load, RAM restored | PASS (EMU, S24) | PASS (EMU 1–4, S24 1–2) | PASS (EMU 1–4) |
+| Auto-save on exit → app killed → Continue, RAM hash equal | PASS (EMU) | PASS (EMU) | PASS (EMU) |
+| Continue on the real phone | PASS (S24: slot0 written with integrity record at exit, RESUME OK) | NOT TESTED on S24 | PASS (S24, boss fight restored: p2_s24_ps1_continued.png) |
+| Restore of a cold-booted game from a manual slot | — | — | PASS (S24, user's slot 2: score 193,536, p2_s24_ps1_slot2.png) |
+| Thumbnails written with the state, same frame | PASS 256×240 | PASS 320×224 / 256×224 | PASS 320×240 |
+| Timestamps ("x minutes ago") in slot list and Continue | PASS (visual, S24) | | |
+| Truncated state with record → refused, game untouched | PASS (EMU, NES) | | |
+| Truncated state, no record → core refuses, current game kept | PASS (EMU, NES) | | |
+| Old-build save (no record) loads | PASS (EMU NES; S24 PS1 user saves show Continue and load) | | |
+| User's saves from the previous build kept | PASS (S24: all 3 games show Continue) | | |
+
+**Found and fixed during testing:**
+- PlayStation Continue restored before the core had run a frame, and the game rebooted. The restore now waits for the first 12 frames: PASS afterwards.
+- A pause could land between two `retro_run` calls, so a state could be one frame newer than its screenshot. Pausing now waits for the frame in progress.
+- **Known, PARTIAL:** the user's existing PS1 auto-save was taken on Metal Slug X's "NOW LOADING!" screen, during a disc read. That one state boots to a black screen. Manual saves and mid-gameplay auto-saves restore correctly. Mitigation idea: keep the previous auto-save as a fallback.
+
+## Priority 2: touch controller
+| Test | Result | Evidence |
+|---|---|---|
+| Two-finger chord, D-pad + face button | PASS (S24, EMU NES+MD) | TOUCH2 step 2, mask 384 |
+| Lift in either order, other finger stays held | PASS (S24, EMU) | steps 3–4 |
+| ACTION_CANCEL releases everything immediately | PASS (S24, EMU) | step 5 |
+| 0 ms tap held ≥ 50 ms then released once | PASS (S24, EMU) + unit test | steps 6–7 |
+| Focus loss releases everything | PASS (S24, EMU) | step 8 |
+| Stuck/highlighted D-pad (phase-1 bug) | FIXED; covered by the above + unit tests | cause: pointer-index tracking and no cancel handling |
+| Editor: drag, resize, opacity, D-pad gap, reset | PASS (EMU; drag shown in p2_editor.png; geometry logged) | |
+| Preset export / import / invalid preset rejected | PASS (EMU) | IMPORT ok / IMPORT rejected |
+| Per-console layouts | PASS (unit tests: every button hit on NES/MD/PS1 at 4 screen sizes) | |
+| Haptic feedback | PARTIAL: setting saved and wired; vibration not felt by a person | |
+| Bluetooth/USB gamepad remap | NOT TESTED: no controller connected (logic unit-tested) | |
+| Real two-finger play on glass | NOT TESTED: adb cannot inject two fingers; synthetic events went through the real view | |
+
+## Priority 3: UI
+| Test | Result |
+|---|---|
+| App icon (user artwork) on Samsung | PASS: App info + splash (p2_s24_icon_appinfo.png, p2_s24_splash.png) |
+| Recent / Favorites tabs; gamepad Y toggles favourite | PASS (S24, p2_s24_favorites.png) |
+| D-pad navigation on home | PASS (S24, keyevent moved selection) |
+| Continue + Start new + favourite buttons | PASS (S24) |
+| Arabic UI with right-to-left layout | PASS (S24, p2_s24_arabic.png); game pad stays left-to-right on purpose |
+| Aspect modes: original / integer / full / 4:3 | PARTIAL: implemented; 4:3 not screenshotted |
+| Cover memory cache, animated tab and tile transitions | Implemented; checked visually only |
+
+## Priority 4: library
+| Test | Result | Evidence |
+|---|---|---|
+| Room cache, first scan | PASS | inspected 3, 124 ms |
+| Unchanged files not reopened | PASS | reused 3, inspected 0, 29 ms |
+| Rename keeps saves (Continue still shown) | PASS (S24) | renamed=1, p2_s24_renamed.png |
+| Missing file → hidden, save data kept | PASS (S24) | missing=1 during rename; save folder untouched |
+| SAF permission kept across updates | PASS (S24) | library loaded after reinstall without asking again |
+
+## Stability
+| Test | Result |
+|---|---|
+| Unit tests | PASS 31/31 (5 CUE, 14 controller/save, 11 ROM, 1 template) |
+| Invalid ROM | PASS: message shown, process alive |
+| Background → frames stop → foreground resumes | PASS (S24) |
+| Memory, Mega Drive running | 95 MB PSS (S24) |
+| Crash buffer during the whole S24 session | 0 nesGames crashes |
+| Audio by ear, long-session soak, low-end phone | NOT TESTED |

@@ -2,6 +2,9 @@ package com.nesgames.app.library
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.DocumentsContract.Document
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.InputStream
@@ -9,18 +12,28 @@ import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
 data class Game(
-    val id: String,          // document uri (+ "!" + zip entry)
+    val id: String,
     val title: String,
     val fileName: String,
     val system: GameSystem,
     val uri: Uri,
     val zipEntry: String?,
     val size: Long,
-    val discFiles: List<String> = emptyList(),   // for CUE discs: track files next to the cue
+    val discFiles: List<String> = emptyList(),
     val dirUri: Uri? = null,
+    val saveKey: String = SaveSlots.keyFor(id),
+    val favorite: Boolean = false,
+    val lastPlayed: Long = 0,
 )
 
-data class ScanResult(val games: List<Game>, val detectedUnsupported: Int, val rejected: Int)
+fun GameRow.toGame(): Game? {
+    val sys = runCatching { GameSystem.valueOf(system) }.getOrNull() ?: return null
+    return Game(id, title, fileName, sys, Uri.parse(uri), zipEntry, size,
+        if (discFiles.isEmpty()) emptyList() else discFiles.split('\n'), dirUri?.let(Uri::parse), saveKey, favorite, lastPlayed)
+}
+
+data class ScanStats(val files: Int, val reused: Int, val inspected: Int, val added: Int, val renamed: Int,
+                     val missing: Int, val unsupported: Int, val rejected: Int, val millis: Long)
 
 /** One sub-folder per console inside the user's chosen nesGames folder. */
 object ConsoleFolders {
@@ -51,65 +64,128 @@ object ConsoleFolders {
     }
 }
 
-/** Walks the user-granted SAF tree. Read-only, bounded depth and bounded reads. */
+/**
+ * Walks the user-granted SAF tree and keeps the Room cache in step with it.
+ * A file whose document (uri, size, modified time) is unchanged is taken from the cache without being opened.
+ * Read-only on the user's files, bounded depth and bounded reads.
+ */
 class LibraryScanner(private val ctx: Context) {
     private val maxDepth = 6
     private val maxZipEntries = 256
     private val maxRomBytes = 64L shl 20
 
-    fun scan(tree: Uri): ScanResult {
-        val root = DocumentFile.fromTreeUri(ctx, tree) ?: return ScanResult(emptyList(), 0, 0)
-        val games = ArrayList<Game>()
-        var unsupported = 0
-        var rejected = 0
-        fun walk(dir: DocumentFile, depth: Int, hint: GameSystem?) {
-            val children = dir.listFiles()
-            for (f in children) {
-                val name = f.name ?: continue
-                if (f.isDirectory) {
-                    if (depth < maxDepth && !name.equals("BIOS", true) && !name.startsWith("."))
-                        walk(f, depth + 1, ConsoleFolders.systemFor(name) ?: hint)
-                    continue
-                }
-                if (!RomInspector.isCandidate(name)) continue
-                val found = runCatching {
-                    if (RomInspector.extensionOf(name) == "cue") inspectCue(f, name, dir, children, hint)
-                    else if (f.length() <= maxRomBytes) inspect(f, name) else emptyList()
-                }.getOrNull()
-                if (found.isNullOrEmpty()) { rejected++; continue }
-                for (g in found) if (com.nesgames.app.emu.Cores.isAvailable(g.system)) games += g else unsupported++
+    private data class Doc(val uri: Uri, val docId: String, val name: String, val isDir: Boolean, val size: Long, val mtime: Long)
+
+    /** One provider query per directory (much cheaper than DocumentFile's query-per-file). */
+    private fun children(tree: Uri, parentDocId: String): List<Doc> {
+        val out = ArrayList<Doc>()
+        val q = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentDocId)
+        ctx.contentResolver.query(q, arrayOf(Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME, Document.COLUMN_MIME_TYPE,
+            Document.COLUMN_SIZE, Document.COLUMN_LAST_MODIFIED), null, null, null)?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getString(0) ?: continue
+                out += Doc(DocumentsContract.buildDocumentUriUsingTree(tree, id), id, c.getString(1) ?: continue,
+                    c.getString(2) == Document.MIME_TYPE_DIR, c.getLong(3), c.getLong(4))
             }
         }
-        walk(root, 0, null)
-        games.sortBy { it.title.lowercase() }
-        return ScanResult(games, unsupported, rejected)
+        return out
+    }
+
+    suspend fun scan(tree: Uri): ScanStats {
+        val t0 = System.currentTimeMillis()
+        val dao = GameDb.get(ctx).games()
+        val cached = dao.all()
+        val byUri = cached.groupBy { it.uri }
+        val seen = HashSet<String>()
+        val upserts = ArrayList<GameRow>()
+        val fresh = ArrayList<Pair<Game, Doc>>()
+        var files = 0; var reused = 0; var inspected = 0; var unsupported = 0; var rejected = 0
+
+        fun walk(dirId: String, dirUri: Uri, depth: Int, hint: GameSystem?) {
+            val kids = runCatching { children(tree, dirId) }.getOrDefault(emptyList())
+            val names = kids.filter { !it.isDir }.associateBy { it.name }
+            for (d in kids) {
+                if (d.isDir) {
+                    if (depth < maxDepth && !d.name.equals("BIOS", true) && !d.name.startsWith("."))
+                        walk(d.docId, d.uri, depth + 1, ConsoleFolders.systemFor(d.name) ?: hint)
+                    continue
+                }
+                if (!RomInspector.isCandidate(d.name)) continue
+                files++
+                val rows = byUri[d.uri.toString()]
+                val unchanged = !rows.isNullOrEmpty() && d.mtime != 0L && rows.all {
+                    it.fileSize == d.size && it.mtime == d.mtime &&
+                        (it.discFiles.isEmpty() || it.discFiles.split('\n').all { n -> names.containsKey(n) })   // disc tracks still present
+                }
+                if (unchanged) {
+                    reused++
+                    for (r in rows!!) { seen += r.id; if (r.missing) upserts += r.copy(missing = false) }
+                    continue
+                }
+                inspected++
+                val found = runCatching {
+                    if (RomInspector.extensionOf(d.name) == "cue") inspectCue(d, dirUri, names, hint)
+                    else if (d.size <= maxRomBytes) inspect(d) else emptyList()
+                }.getOrNull()
+                if (found.isNullOrEmpty()) { rejected++; continue }
+                for (g in found) if (com.nesgames.app.emu.Cores.isAvailable(g.system)) fresh += g to d else unsupported++
+            }
+        }
+        val rootId = DocumentsContract.getTreeDocumentId(tree)
+        walk(rootId, DocumentsContract.buildDocumentUriUsingTree(tree, rootId), 0, null)
+
+        // New or changed files: keep user data when the id is known, or when a vanished entry has the same fingerprint (rename/move).
+        val byId = cached.associateBy { it.id }
+        val orphans = cached.filter { it.id !in seen }.toMutableList()
+        var added = 0; var renamed = 0
+        for ((g, d) in fresh) {
+            val fp = runCatching { fingerprint(g, d) }.getOrDefault("")
+            val old = byId[g.id]
+            val moved = if (old == null && fp.isNotEmpty()) orphans.firstOrNull { it.fingerprint == fp && it.system == g.system.name && it.id !in seen } else null
+            val keep = old ?: moved
+            if (moved != null) { dao.delete(moved.id); orphans.remove(moved); renamed++ } else if (old == null) added++
+            seen += g.id
+            upserts += GameRow(g.id, g.title, g.fileName, g.system.name, g.uri.toString(), g.zipEntry, g.size, d.size, d.mtime,
+                g.discFiles.joinToString("\n"), g.dirUri?.toString(), fp, keep?.saveKey ?: SaveSlots.keyFor(g.id),
+                keep?.favorite ?: false, keep?.lastPlayed ?: 0, false)
+        }
+        if (upserts.isNotEmpty()) dao.upsert(upserts)
+        val gone = cached.filter { it.id !in seen && !it.missing }.map { it.id }
+        gone.chunked(500).forEach { dao.markMissing(it) }   // flagged, never deleted: saves and favourites stay
+        val stats = ScanStats(files, reused, inspected, added, renamed, gone.size, unsupported, rejected, System.currentTimeMillis() - t0)
+        Log.i("nesGamesScan", stats.toString())
+        return stats
+    }
+
+    private fun head(uri: Uri, n: Int) = ctx.contentResolver.openInputStream(uri)?.use { readUpTo(it, n) } ?: ByteArray(0)
+
+    private fun fingerprint(g: Game, d: Doc): String {
+        val md = MessageDigest.getInstance("SHA-1")
+        md.update(head(d.uri, 64 * 1024))
+        return md.digest().joinToString("") { "%02x".format(it) } + ":" + g.size
     }
 
     /** A CUE is accepted only if every referenced track file exists next to it. */
-    private fun inspectCue(f: DocumentFile, name: String, dir: DocumentFile, siblings: Array<DocumentFile>, hint: GameSystem?): List<Game> {
-        val text = ctx.contentResolver.openInputStream(f.uri)?.use { String(readUpTo(it, 64 * 1024)) } ?: return emptyList()
-        val parsed = CueSheet.parse(text) ?: return emptyList()
-        val byName = siblings.associateBy { it.name }
-        if (parsed.files.any { byName[it] == null || !RomInspector.isSafeEntryName(it) || it.contains('/') }) return emptyList()
-        // Only PlayStation discs are supported; data tracks are MODE2 on PS1
-        val system = hint ?: if (parsed.mode2) GameSystem.PS1 else return emptyList()
+    private fun inspectCue(d: Doc, dirUri: Uri, siblings: Map<String, Doc>, hint: GameSystem?): List<Game> {
+        val parsed = CueSheet.parse(String(head(d.uri, 64 * 1024))) ?: return emptyList()
+        if (parsed.files.any { siblings[it] == null || !RomInspector.isSafeEntryName(it) || it.contains('/') }) return emptyList()
+        val system = hint ?: if (parsed.mode2) GameSystem.PS1 else return emptyList()   // data tracks are MODE2 on PS1
         if (system != GameSystem.PS1) return emptyList()
-        val size = parsed.files.sumOf { byName[it]!!.length() }
-        return listOf(Game(f.uri.toString(), titleOf(name), name, system, f.uri, null, size, parsed.files, dir.uri))
+        val size = parsed.files.sumOf { siblings[it]!!.size }
+        return listOf(Game(d.uri.toString(), titleOf(d.name), d.name, system, d.uri, null, size, parsed.files, dirUri))
     }
 
-    private fun inspect(f: DocumentFile, name: String): List<Game> {
-        val ext = RomInspector.extensionOf(name)
-        ctx.contentResolver.openInputStream(f.uri)?.use { input ->
-            if (ext == "zip") return inspectZip(input, f, name)
-            val sys = RomInspector.identify(name, readUpTo(input, RomInspector.HEADER_BYTES)) ?: return emptyList()
-            return listOf(Game(f.uri.toString(), titleOf(name), name, sys, f.uri, null, f.length()))
+    private fun inspect(d: Doc): List<Game> {
+        ctx.contentResolver.openInputStream(d.uri)?.use { input ->
+            if (RomInspector.extensionOf(d.name) == "zip") return inspectZip(input, d)
+            val sys = RomInspector.identify(d.name, readUpTo(input, RomInspector.HEADER_BYTES)) ?: return emptyList()
+            return listOf(Game(d.uri.toString(), titleOf(d.name), d.name, sys, d.uri, null, d.size))
         }
         return emptyList()
     }
 
     /** A cartridge zip holds one recognised ROM; zips with many members (arcade sets) are not listed here. */
-    private fun inspectZip(input: InputStream, f: DocumentFile, name: String): List<Game> {
+    private fun inspectZip(input: InputStream, d: Doc): List<Game> {
         val hits = ArrayList<Game>()
         var entries = 0
         ZipInputStream(input).use { zip ->
@@ -118,7 +194,7 @@ class LibraryScanner(private val ctx: Context) {
                 if (++entries > maxZipEntries) return emptyList()
                 if (e.isDirectory || !RomInspector.isSafeEntryName(e.name)) continue
                 val sys = RomInspector.identify(e.name, readUpTo(zip, RomInspector.HEADER_BYTES)) ?: continue
-                hits += Game("${f.uri}!${e.name}", titleOf(name), name, sys, f.uri, e.name, f.length())
+                hits += Game("${d.uri}!${e.name}", titleOf(d.name), d.name, sys, d.uri, e.name, d.size)
             }
         }
         return if (hits.size == 1) hits else emptyList()
@@ -136,12 +212,12 @@ class LibraryScanner(private val ctx: Context) {
             .replace('_', ' ').replace(Regex("\\s*[\\[(][^\\])]*[\\])]"), "").trim().ifEmpty { fileName }
 
         /** Reads a ROM fully into memory with a hard cap; zip entries are extracted in-memory, never to disk. */
-        fun loadRom(ctx: Context, game: Game, cap: Int = 16 shl 20): ByteArray {
-            val input = ctx.contentResolver.openInputStream(game.uri) ?: error("Cannot open ${game.fileName}")
+        fun loadRom(ctx: Context, uri: Uri, zipEntry: String?, cap: Int = 16 shl 20): ByteArray {
+            val input = ctx.contentResolver.openInputStream(uri) ?: error("Cannot open the game file")
             input.use {
-                val stream: InputStream = if (game.zipEntry == null) it else {
+                val stream: InputStream = if (zipEntry == null) it else {
                     val zip = ZipInputStream(it)
-                    while (true) { val e = zip.nextEntry ?: error("Entry missing"); if (e.name == game.zipEntry) break }
+                    while (true) { val e = zip.nextEntry ?: error("Entry missing"); if (e.name == zipEntry) break }
                     zip
                 }
                 val data = readUpTo(stream, cap + 1)
@@ -180,14 +256,11 @@ class LibraryScanner(private val ctx: Context) {
 
         /** name -> (document uri, size) for the direct children of a SAF directory document. */
         fun listChildren(ctx: Context, dirUri: Uri): Map<String, Pair<Uri, Long>> {
-            val parentId = android.provider.DocumentsContract.getDocumentId(dirUri)
-            val q = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(dirUri, parentId)
+            val parentId = DocumentsContract.getDocumentId(dirUri)
+            val q = DocumentsContract.buildChildDocumentsUriUsingTree(dirUri, parentId)
             val out = HashMap<String, Pair<Uri, Long>>()
-            ctx.contentResolver.query(q, arrayOf(
-                android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                android.provider.DocumentsContract.Document.COLUMN_SIZE), null, null, null)?.use { c ->
-                while (c.moveToNext()) out[c.getString(1)] = android.provider.DocumentsContract.buildDocumentUriUsingTree(dirUri, c.getString(0)) to c.getLong(2)
+            ctx.contentResolver.query(q, arrayOf(Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME, Document.COLUMN_SIZE), null, null, null)?.use { c ->
+                while (c.moveToNext()) out[c.getString(1)] = DocumentsContract.buildDocumentUriUsingTree(dirUri, c.getString(0)) to c.getLong(2)
             }
             return out
         }
