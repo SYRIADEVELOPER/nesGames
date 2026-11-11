@@ -166,14 +166,27 @@ class LibraryScanner(private val ctx: Context) {
     private fun importBios(tree: Uri, rootId: String) {
         val biosDir = children(tree, rootId).firstOrNull { it.isDir && it.name.equals("BIOS", true) } ?: return
         val dest = File(ctx.filesDir, "system/pcsx2/bios").apply { mkdirs() }
-        for (d in children(tree, biosDir.docId)) {
-            if (d.isDir || d.size != 4L shl 20 || !RomInspector.isSafeEntryName(d.name) || d.name.contains('/')) continue
+        val kids = children(tree, biosDir.docId).filter { !it.isDir && RomInspector.isSafeEntryName(it.name) && !it.name.contains('/') }
+        for (d in kids) {
+            if (d.size != 4L shl 20) continue
             val out = File(dest, d.name)
-            if (out.length() == d.size) continue
-            val data = ctx.contentResolver.openInputStream(d.uri)?.use { readUpTo(it, (4 shl 20) + 1) } ?: continue
-            if (!RomInspector.isPs2Bios(data.size.toLong(), data.copyOf(minOf(data.size, 256 * 1024)))) { Log.i("nesGamesScan", "BIOS skipped (not a PS2 BIOS): ${d.name}"); continue }
-            val tmp = File(dest, d.name + ".part"); tmp.writeBytes(data); tmp.renameTo(out)
-            Log.i("nesGamesScan", "PS2 BIOS imported: ${d.name}")
+            if (out.length() != d.size) {
+                val data = ctx.contentResolver.openInputStream(d.uri)?.use { readUpTo(it, (4 shl 20) + 1) } ?: continue
+                if (!RomInspector.isPs2Bios(data.size.toLong(), data.copyOf(minOf(data.size, 256 * 1024)))) { Log.i("nesGamesScan", "BIOS skipped (not a PS2 BIOS): ${d.name}"); continue }
+                if (Ps2Bios.romver(data) == null) { Log.i("nesGamesScan", "BIOS skipped (no ROMVER, not a main PS2 BIOS): ${d.name}"); continue }
+                val tmp = File(dest, d.name + ".part"); tmp.writeBytes(data); tmp.renameTo(out)
+                Log.i("nesGamesScan", "PS2 BIOS imported: ${d.name}")
+            }
+            // Companion .nvm/.mec (same base name) are copied once and never overwritten: the core keeps them updated.
+            val base = d.name.substringBeforeLast('.')
+            for (c in kids) {
+                val ext = c.name.substringAfterLast('.', "").lowercase()
+                if (ext !in Ps2Bios.COMPANIONS || !c.name.substringBeforeLast('.').equals(base, true) || c.size > 64 * 1024) continue
+                val co = File(dest, "$base.$ext")
+                if (co.exists()) continue
+                ctx.contentResolver.openInputStream(c.uri)?.use { s -> val b = readUpTo(s, 64 * 1024); File(dest, co.name + ".part").apply { writeBytes(b); renameTo(co) } }
+                Log.i("nesGamesScan", "PS2 BIOS companion copied: ${co.name}")
+            }
         }
     }
 
@@ -188,9 +201,13 @@ class LibraryScanner(private val ctx: Context) {
     /** Single-file PS2 disc images (.iso/.cso/.chd) live in the PS2 folder; an .iso must carry an ISO 9660 header. */
     private fun inspectDisc(d: Doc, hint: GameSystem?): List<Game> {
         if (hint != GameSystem.PS2) return emptyList()
-        if (RomInspector.extensionOf(d.name) == "iso") {
-            val head = ctx.contentResolver.openInputStream(d.uri)?.use { s -> s.skip(0x8000); readUpTo(s, 8) } ?: return emptyList()
-            if (!RomInspector.isIso9660(head)) return emptyList()
+        when (RomInspector.extensionOf(d.name)) {
+            "iso" -> {
+                val head = ctx.contentResolver.openInputStream(d.uri)?.use { s -> s.skip(0x8000); readUpTo(s, 8) } ?: return emptyList()
+                if (!RomInspector.isIso9660(head)) return emptyList()
+            }
+            "chd" -> if (String(head(d.uri, 8), Charsets.US_ASCII) != "MComprHD") return emptyList()   // MAME CHD v5 header
+            "cso" -> if (String(head(d.uri, 4), Charsets.US_ASCII) != "CISO") return emptyList()       // compressed ISO
         }
         return listOf(Game(d.uri.toString(), titleOf(d.name), d.name, GameSystem.PS2, d.uri, null, d.size))
     }
@@ -282,6 +299,34 @@ class LibraryScanner(private val ctx: Context) {
                 require(tmp.renameTo(out)) { "Could not store $n" }
             }
             return File(dest, cueName)
+        }
+
+        /**
+         * Copies a single-file disc (PS2 .iso/.chd/.cso) into app-private storage once. Android does not let a
+         * native core re-open a shared-storage document by path (/proc/self/fd re-open fails with EACCES), and
+         * MANAGE_EXTERNAL_STORAGE is deliberately not requested. Re-uses the copy while the size still matches.
+         */
+        fun importSingleDisc(ctx: Context, uri: Uri, name: String, progress: (Float) -> Unit): File {
+            require(RomInspector.isSafeEntryName(name) && !name.contains('/')) { "Unsafe file name" }
+            val key = MessageDigest.getInstance("SHA-1").digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it) }.take(16)
+            val dest = File(ctx.filesDir, "discs/$key").apply { mkdirs() }
+            val out = File(dest, name)
+            val size = ctx.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+            if (size > 0 && out.length() == size) { progress(1f); return out }
+            dest.listFiles()?.forEach { it.delete() }   // an older or partial copy of this disc
+            require(size <= 0 || dest.usableSpace > size + (256L shl 20)) { "Not enough free space to prepare this disc" }
+            val tmp = File(dest, "$name.part")
+            var done = 0L
+            ctx.contentResolver.openInputStream(uri)!!.use { ins ->
+                tmp.outputStream().use { os ->
+                    val buf = ByteArray(4 shl 20)
+                    while (true) { val r = ins.read(buf); if (r < 0) break; os.write(buf, 0, r); done += r; if (size > 0) progress(done.toFloat() / size) }
+                    os.fd.sync()
+                }
+            }
+            require(size <= 0 || tmp.length() == size) { "Disc copy incomplete" }
+            require(tmp.renameTo(out)) { "Could not store $name" }
+            return out
         }
 
         /** name -> (document uri, size) for the direct children of a SAF directory document. */

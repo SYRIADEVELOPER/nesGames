@@ -6,7 +6,7 @@ import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.min
 
-enum class Shape { CIRCLE, PILL, DPAD, MENU }
+enum class Shape { CIRCLE, PILL, DPAD, MENU, STICK }
 enum class AH { LEFT, CENTER, RIGHT }
 enum class AV { TOP, BOTTOM }
 
@@ -96,16 +96,19 @@ class PadLayout(val system: GameSystem) {
                 Spec("TRIANGLE", "△", RetroPad.X, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.2448f, 0.3519f),
                 Spec("L1", "L1", RetroPad.L, Shape.PILL, 0.06f, AH.LEFT, AV.TOP, 0.132f, 0.2f),
                 Spec("R1", "R1", RetroPad.R, Shape.PILL, 0.06f, AH.RIGHT, AV.TOP, 0.132f, 0.2f)) + meta("SELECT")
-            // PlayStation 2: PS1 face buttons + L2/R2 (RetroPad L2 = 12, R2 = 13). Analog sticks: not yet.
-            GameSystem.PS2 -> listOf(dpad,
+            // PlayStation 2 (DualShock 2): two analog sticks, D-pad above the left stick, face buttons, L1/R1/L2/R2.
+            GameSystem.PS2 -> listOf(
+                Spec("LSTICK", "", 0, Shape.STICK, 0.13f, AH.LEFT, AV.BOTTOM, 0.20f, 0.20f),
+                Spec("DPAD", "", -1, Shape.DPAD, 0.11f, AH.LEFT, AV.BOTTOM, 0.20f, 0.56f),
+                Spec("RSTICK", "", 1, Shape.STICK, 0.10f, AH.RIGHT, AV.BOTTOM, 0.64f, 0.16f),
                 Spec("CIRCLE", "○", RetroPad.A, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.1054f, 0.2125f),
                 Spec("CROSS", "✕", RetroPad.B, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.2448f, 0.0731f),
                 Spec("SQUARE", "□", RetroPad.Y, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.3842f, 0.2125f),
                 Spec("TRIANGLE", "△", RetroPad.X, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.2448f, 0.3519f),
                 Spec("L1", "L1", RetroPad.L, Shape.PILL, 0.06f, AH.LEFT, AV.TOP, 0.132f, 0.2f),
                 Spec("R1", "R1", RetroPad.R, Shape.PILL, 0.06f, AH.RIGHT, AV.TOP, 0.132f, 0.2f),
-                Spec("L2", "L2", 12, Shape.PILL, 0.06f, AH.LEFT, AV.TOP, 0.132f, 0.075f),
-                Spec("R2", "R2", 13, Shape.PILL, 0.06f, AH.RIGHT, AV.TOP, 0.132f, 0.075f)) + meta("SELECT")
+                Spec("L2", "L2", RetroPad.L2, Shape.PILL, 0.06f, AH.LEFT, AV.TOP, 0.132f, 0.075f),
+                Spec("R2", "R2", RetroPad.R2, Shape.PILL, 0.06f, AH.RIGHT, AV.TOP, 0.132f, 0.075f)) + meta("SELECT")
             else -> listOf(dpad,
                 Spec("A", "A", RetroPad.A, Shape.CIRCLE, 0.075f, AH.RIGHT, AV.BOTTOM, 0.1125f, 0.255f),
                 Spec("B", "B", RetroPad.B, Shape.CIRCLE, 0.075f, AH.RIGHT, AV.BOTTOM, 0.2925f, 0.1875f)) + meta("SELECT")
@@ -134,6 +137,18 @@ class Geometry(val layout: PadLayout, val w: Float, val h: Float) {
 
     private fun dpadReach(e: Elem) = r(e) * (0.73f + 0.62f * layout.dpadSpread)
 
+    /** The stick whose area contains (x, y), if any (grab radius 1.4 r). */
+    fun stickAt(x: Float, y: Float): Elem? = layout.elems.firstOrNull { it.spec.shape == Shape.STICK && hypot(x - cx(it), y - cy(it)) <= r(it) * 1.4f }
+
+    /** Stick deflection for a finger at (x, y): -32767..32767 per axis, clamped to the stick radius, +y = down. */
+    fun stickValue(e: Elem, x: Float, y: Float): Pair<Int, Int> {
+        val r = r(e); var dx = (x - cx(e)) / r; var dy = (y - cy(e)) / r
+        val len = hypot(dx, dy)
+        if (len > 1f) { dx /= len; dy /= len }
+        if (len < 0.12f) return 0 to 0   // dead zone
+        return (dx * 32767).toInt() to (dy * 32767).toInt()
+    }
+
     fun isMenu(x: Float, y: Float) = layout.elems.any { it.spec.shape == Shape.MENU && dist(it, x, y) <= r(it) * 1.2f }
 
     /** Buttons under one touch point, as a RetroPad bit mask. */
@@ -155,7 +170,7 @@ class Geometry(val layout: PadLayout, val w: Float, val h: Float) {
                         return m
                     }
                 }
-                Shape.MENU -> {}
+                Shape.MENU, Shape.STICK -> {}
                 else -> { val d = dist(e, x, y); if (d < r(e) * 1.5f && d < bestD) { best = e; bestD = d } }
             }
         }
@@ -227,6 +242,7 @@ class PadMap(private val map: MutableMap<Int, Int> = defaults().toMutableMap()) 
         const val DPAD_UP = 19; const val DPAD_DOWN = 20; const val DPAD_LEFT = 21; const val DPAD_RIGHT = 22
         const val BUTTON_A = 96; const val BUTTON_B = 97; const val BUTTON_X = 99; const val BUTTON_Y = 100
         const val BUTTON_L1 = 102; const val BUTTON_R1 = 103; const val BUTTON_START = 108; const val BUTTON_SELECT = 109
+        const val BUTTON_L2 = 104; const val BUTTON_R2 = 105; const val BUTTON_THUMBL = 106; const val BUTTON_THUMBR = 107
         const val ENTER = 66; const val SPACE = 62; const val KEY_Z = 54; const val KEY_X = 52
         private val KEYBOARD = setOf(ENTER, SPACE, KEY_Z, KEY_X)
 
@@ -236,6 +252,7 @@ class PadMap(private val map: MutableMap<Int, Int> = defaults().toMutableMap()) 
             BUTTON_B to RetroPad.A,      // right face button  -> A / Circle
             BUTTON_X to RetroPad.Y, BUTTON_Y to RetroPad.X,
             BUTTON_L1 to RetroPad.L, BUTTON_R1 to RetroPad.R,
+            BUTTON_L2 to RetroPad.L2, BUTTON_R2 to RetroPad.R2, BUTTON_THUMBL to RetroPad.L3, BUTTON_THUMBR to RetroPad.R3,
             BUTTON_START to RetroPad.START, BUTTON_SELECT to RetroPad.SELECT,
             ENTER to RetroPad.START, SPACE to RetroPad.SELECT, KEY_Z to RetroPad.B, KEY_X to RetroPad.A,
         )

@@ -16,7 +16,10 @@ import kotlin.math.hypot
  * Touch pad drawn from a [PadLayout]. Play mode: every pointer is tracked by (device, pointer id).
  * Edit mode: drag a control to move it, pinch to resize the selected one.
  */
-class ControlsView(ctx: Context, layout: PadLayout, private val onMask: (Int) -> Unit, private val onMenu: () -> Unit) : View(ctx) {
+class ControlsView(
+    ctx: Context, layout: PadLayout, private val onMask: (Int) -> Unit, private val onMenu: () -> Unit,
+    private val onStick: (stick: Int, x: Int, y: Int) -> Unit = { _, _, _ -> },
+) : View(ctx) {
     var layout: PadLayout = layout
         set(v) { field = v; geom = Geometry(v, width.toFloat().coerceAtLeast(1f), height.toFloat().coerceAtLeast(1f)); selected = null; invalidate() }
     var geom = Geometry(layout, 1f, 1f); private set
@@ -27,6 +30,8 @@ class ControlsView(ctx: Context, layout: PadLayout, private val onMask: (Int) ->
 
     private val tracker = TouchTracker()
     private val ignored = HashSet<Long>()     // pointers that opened the menu
+    private val stickOwner = HashMap<Long, Elem>()   // pointer -> analog stick it is steering
+    private val stickPos = HashMap<Elem, Pair<Int, Int>>()
     private var mask = 0
     private val expire = Runnable { publish() }
 
@@ -43,6 +48,8 @@ class ControlsView(ctx: Context, layout: PadLayout, private val onMask: (Int) ->
     /** Drops every pointer and latched press and reports mask 0. Safe to call at any time. */
     fun releaseAll() {
         tracker.clear(); ignored.clear(); removeCallbacks(expire)
+        for (e in stickOwner.values.toSet() + stickPos.keys) { onStick(e.spec.retro, 0, 0) }
+        stickOwner.clear(); stickPos.clear()
         if (mask != 0) { mask = 0; onMask(0) }
         invalidate()
     }
@@ -69,21 +76,37 @@ class ControlsView(ctx: Context, layout: PadLayout, private val onMask: (Int) ->
         val now = SystemClock.uptimeMillis()
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                val i = e.actionIndex
-                if (geom.isMenu(e.getX(i), e.getY(i))) { ignored += key(e, i); onMenu() }
-                else tracker.set(key(e, i), geom.maskAt(e.getX(i), e.getY(i)), now)
+                val i = e.actionIndex; val x = e.getX(i); val y = e.getY(i)
+                val stick = geom.stickAt(x, y)
+                if (geom.isMenu(x, y)) { ignored += key(e, i); onMenu() }
+                else if (stick != null && stick !in stickOwner.values) { stickOwner[key(e, i)] = stick; moveStick(stick, x, y) }
+                else tracker.set(key(e, i), geom.maskAt(x, y), now)
             }
             MotionEvent.ACTION_MOVE -> for (i in 0 until e.pointerCount) {
                 val k = key(e, i)
-                if (k !in ignored) tracker.set(k, geom.maskAt(e.getX(i), e.getY(i)), now)
+                val s = stickOwner[k]
+                if (s != null) moveStick(s, e.getX(i), e.getY(i))
+                else if (k !in ignored) tracker.set(k, geom.maskAt(e.getX(i), e.getY(i)), now)
             }
-            MotionEvent.ACTION_POINTER_UP -> { val k = key(e, e.actionIndex); ignored -= k; tracker.remove(k, now) }
-            MotionEvent.ACTION_UP -> for (i in 0 until e.pointerCount) { val k = key(e, i); ignored -= k; tracker.remove(k, now) }
+            MotionEvent.ACTION_POINTER_UP -> { val k = key(e, e.actionIndex); ignored -= k; liftStick(k); tracker.remove(k, now) }
+            MotionEvent.ACTION_UP -> for (i in 0 until e.pointerCount) { val k = key(e, i); ignored -= k; liftStick(k); tracker.remove(k, now) }
             MotionEvent.ACTION_CANCEL -> { releaseAll(); return true }   // gesture stolen by the system: release everything now
         }
         publish()
         return true
     }
+
+    private fun moveStick(s: Elem, x: Float, y: Float) {
+        val v = geom.stickValue(s, x, y)
+        if (stickPos[s] != v) { stickPos[s] = v; onStick(s.spec.retro, v.first, v.second); invalidate() }
+    }
+
+    private fun liftStick(k: Long) {
+        val s = stickOwner.remove(k) ?: return
+        stickPos.remove(s); onStick(s.spec.retro, 0, 0); invalidate()   // springs back to centre
+    }
+
+    fun stickValue(stick: Int) = stickPos.entries.firstOrNull { it.key.spec.retro == stick }?.value ?: (0 to 0)
 
     // ---- editor ----
     private var grabDx = 0f; private var grabDy = 0f
@@ -134,6 +157,14 @@ class ControlsView(ctx: Context, layout: PadLayout, private val onMask: (Int) ->
                         c.drawRoundRect(ax - arm, ay - arm, ax + arm, ay + arm, arm * 0.3f, arm * 0.3f, under)
                         c.drawRoundRect(ax - arm, ay - arm, ax + arm, ay + arm, arm * 0.3f, arm * 0.3f, stroke)
                     }
+                }
+                Shape.STICK -> {
+                    fill.color = col(false)
+                    c.drawCircle(cx, cy, r, fill); c.drawCircle(cx, cy, r, under); c.drawCircle(cx, cy, r, stroke)
+                    val (vx, vy) = stickPos[e] ?: (0 to 0)
+                    val kx = cx + vx / 32767f * r * 0.6f; val ky = cy + vy / 32767f * r * 0.6f
+                    fill.color = col(vx != 0 || vy != 0)
+                    c.drawCircle(kx, ky, r * 0.45f, fill); c.drawCircle(kx, ky, r * 0.45f, stroke)
                 }
                 Shape.CIRCLE -> {
                     fill.color = col(mask and RetroPad.bit(e.spec.retro) != 0)

@@ -158,3 +158,21 @@ Checkpoint before changes: git tag `phase1-checkpoint`; the user's saves were ba
 | Black (USA) 3.9 GB ISO on device | READY | files/discs/ps2/black.iso, 3,919,609,856 B |
 | Game boot / rendering / audio / FPS | **BLOCKED: needs the user's PS2 BIOS** | |
 | NES / MD regression after the GLES3 change | PASS | slot 1 save/load RAM equal; 0 crashes |
+
+# PS2 with the user's BIOS (2026-11-11, Galaxy S24, Adreno 750)
+| Step | Result | Evidence |
+|---|---|---|
+| Black (USA).iso found in Download/nesGames/PS2 | PASS | ScanStats added=1; PS2 tab shows "Black · PlayStation 2 · 3738 MB" (p2_ps2_library.png) |
+| Launch without BIOS shows clear message | PASS | "Can't start game … needs a BIOS" (p2_ps2_library_nobios.png) |
+| Invalid 4 MB file (zeros) rejected | PASS | log "BIOS skipped (not a PS2 BIOS): zeros_test.bin"; nothing imported; dialog "No PS2 BIOS installed" (p2_bios_dialog_none.png) |
+| ROM1/DVD images no longer accepted | PASS (unit test) | Ps2BiosRomverTest: ROMDIR without ROMVER is rejected |
+| User BIOS SCPH-70012 imported + validated | PASS | "PS2 BIOS imported", .nvm/.mec copied; dialog "✓ … PS2 BIOS 2.00 · USA · 2004-06-14" (p2_bios_dialog_valid.png) |
+| Core finds the BIOS | PASS | core: "Using BIOS … SCPH-70012 … USA v02.00(14/06/2004)" |
+| Open-in-place through /proc/self/fd | FAIL → replaced | core: "Failed to open CDVD 'disc.iso': errno 13: Permission denied". Discs are now copied once into app storage (size-checked) |
+| Black boots and renders | PASS (boot + title logo) | game's "BLACK" logo on screen (p2_ps2_black_run2.png); core PerfLog 59.6 fps; video ~30 presents/s; audio 48 kHz streaming, no new underruns after start |
+| Gameplay, save states, memory cards on PS2 | NOT TESTED | the user was holding the phone; no input was injected |
+| Physical gamepad on PS2 | NOT TESTED | |
+| Vulkan | NOT IMPLEMENTED | GLES 3.2 path only |
+
+# In-game menu restyle
+Pause, save/load slots, overwrite confirm, controls, remap, disc-copy progress and "can't start" now use one Compose overlay in the library's style (per-game gradient, white pill selection, icons, A/B hints, RTL). D-pad/stick/L1/R1 move, A/Enter select, B back. Log evidence from the user's own session: "MENU open 'Black' tag=pause items=7 / MENU pick #0 'Resume' / MENU closed".

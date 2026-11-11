@@ -1,6 +1,5 @@
 package com.nesgames.app.ui
 
-import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -20,16 +19,30 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.ui.platform.ComposeView
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -58,7 +71,7 @@ class GameActivity : ComponentActivity() {
     companion object {
         const val EXTRA_URI = "uri"; const val EXTRA_ENTRY = "entry"; const val EXTRA_NAME = "name"; const val EXTRA_SYSTEM = "system"
         const val EXTRA_ID = "game_id"; const val EXTRA_SAVE_KEY = "save_key"; const val EXTRA_RESUME = "resume"
-        const val EXTRA_DIR = "dir"; const val EXTRA_DISC_FILES = "disc_files"
+        const val EXTRA_DIR = "dir"; const val EXTRA_DISC_FILES = "disc_files"; const val EXTRA_TITLE = "title"
         /** Debug builds only: absolute path of a ROM inside this app's private storage, for adb QA runs. */
         const val EXTRA_TEST_FILE = "test_rom_file"
         const val QA_TAG = "nesGamesQA"
@@ -109,7 +122,6 @@ class GameActivity : ComponentActivity() {
         return true
     }
 
-    private var discFd: android.os.ParcelFileDescriptor? = null
 
     /** The ARMSX2 core reads its shaders, fonts and game database from <system>/pcsx2/resources (bundled in assets). */
     private fun installPs2Resources() {
@@ -178,17 +190,26 @@ class GameActivity : ComponentActivity() {
                 override fun onDrawFrame(g: GL10?) = NativeBridge.nativeDrawFrame()   // vsync-paced by EGL swap
             })
         }
-        controls = ControlsView(this, layout, { touchMask = it; pushInput() }, { showMenu() })
+        controls = ControlsView(this, layout, { touchMask = it; pushInput() }, { showMenu() },
+            onStick = { stick, x, y -> touchStick[stick] = x to y; pushAnalog(stick) })
         controls.onEdited = { LayoutStore.save(this, layout) }
         controls.layoutDirection = View.LAYOUT_DIRECTION_LTR
         editBar = buildEditBar()
+        menuView = ComposeView(this).apply {
+            visibility = View.GONE
+            layoutDirection = View.LAYOUT_DIRECTION_LOCALE   // the menu follows the UI language (Arabic = RTL)
+            val hue = menuHue(system, gameTitle)
+            val sel = getString(R.string.menu_select); val back = getString(R.string.back)
+            setContent { GameMenuOverlay(menu, hue, sel, back, ::menuPick) }
+        }
         setContentView(FrameLayout(this).apply {
             layoutDirection = View.LAYOUT_DIRECTION_LTR   // a game pad never mirrors, whatever the UI language
             addView(gl); addView(controls)
             addView(editBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+            addView(menuView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         })
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() { if (editing) finishEdit() else showMenu() }
+            override fun handleOnBackPressed() { if (menu.page != null) menuBack() else if (editing) finishEdit() else showMenu() }
         })
         if (BuildConfig.DEBUG) ContextCompat.registerReceiver(this, qaReceiver, IntentFilter(QA_ACTION), ContextCompat.RECEIVER_EXPORTED)
         lifecycleScope.launch { load() }
@@ -205,7 +226,8 @@ class GameActivity : ComponentActivity() {
     private suspend fun load() {
         val corePath = Cores.corePath(this, system) ?: return fail(getString(R.string.no_core, system.label))
         // The PS2 core "loads" without a BIOS and then shows nothing, so check first and say why.
-        if (system == GameSystem.PS2 && File(filesDir, "system/pcsx2/bios").listFiles { f -> f.length() == 4L shl 20 }.isNullOrEmpty()) {
+        val skipBiosCheck = BuildConfig.DEBUG && intent.getBooleanExtra("qa_skip_bios_check", false)
+        if (system == GameSystem.PS2 && !skipBiosCheck && com.nesgames.app.library.Ps2Bios.installed(this).none { it.valid }) {
             Log.e(QA_TAG, "BOOT_FAIL no PS2 BIOS")
             return fail(getString(R.string.ps2_bios_missing))
         }
@@ -219,30 +241,36 @@ class GameActivity : ComponentActivity() {
                     // discs (cue/chd/bin) stay on disk; the core opens the cue and its referenced tracks
                     if (f.extension.lowercase() in setOf("cue", "chd", "bin", "iso", "pbp")) f.path to ByteArray(0) else f.name to f.readBytes()
                 } else if (system == GameSystem.PS2) {
-                    // A multi-GB disc is opened in place: the core gets a symlink (with the right extension)
-                    // to this process's open file descriptor of the SAF document. Nothing is copied.
+                    // The core opens the disc by path. Re-opening the SAF document through /proc/self/fd is refused
+                    // by Android (EACCES, tested on the S24), so the disc is copied into app storage on first launch.
                     val name = intent.getStringExtra(EXTRA_NAME) ?: "disc.iso"
-                    val pfd = contentResolver.openFileDescriptor(Uri.parse(intent.getStringExtra(EXTRA_URI)), "r") ?: error("Cannot open the disc")
-                    discFd = pfd
-                    val link = File(cacheDir, "disc." + RomInspector.extensionOf(name).ifEmpty { "iso" })
-                    link.delete()
-                    android.system.Os.symlink("/proc/self/fd/${pfd.fd}", link.path)
-                    link.path to ByteArray(0)
+                    withContext(Dispatchers.Main) {
+                        openPage(MenuPage(getString(R.string.preparing_disc), getString(R.string.first_launch), blocking = true, progress = 0f, tag = "prepare"))
+                    }
+                    try {
+                        var last = -1
+                        val disc = LibraryScanner.importSingleDisc(this@GameActivity, Uri.parse(intent.getStringExtra(EXTRA_URI)), name) { p ->
+                            val pct = (p * 100).toInt()
+                            if (pct != last) { last = pct; ui.post { menu.page = menu.page?.copy(subtitle = getString(R.string.copying_disc, pct), progress = p) } }
+                        }
+                        Log.i(QA_TAG, "PS2 disc ready ${disc.length()} B")
+                        disc.path to ByteArray(0)
+                    } finally { withContext(Dispatchers.Main) { closeMenu() } }
                 } else if (intent.getStringExtra(EXTRA_DIR) != null) {
                     // CUE disc: copy cue + tracks into app storage once, then let the core open them by path
                     val name = intent.getStringExtra(EXTRA_NAME) ?: "disc.cue"
-                    val progress = withContext(Dispatchers.Main) {
-                        AlertDialog.Builder(this@GameActivity).setTitle(R.string.preparing_disc).setMessage(R.string.first_launch).setCancelable(false).show()
+                    withContext(Dispatchers.Main) {
+                        openPage(MenuPage(getString(R.string.preparing_disc), getString(R.string.first_launch), blocking = true, progress = 0f, tag = "prepare"))
                     }
                     try {
                         var last = -1
                         val cue = LibraryScanner.importDisc(this@GameActivity, Uri.parse(intent.getStringExtra(EXTRA_URI)),
                             Uri.parse(intent.getStringExtra(EXTRA_DIR)), name, intent.getStringArrayExtra(EXTRA_DISC_FILES)?.toList().orEmpty()) { p ->
                             val pct = (p * 100).toInt()
-                            if (pct != last) { last = pct; ui.post { progress.setMessage(getString(R.string.copying_disc, pct)) } }
+                            if (pct != last) { last = pct; ui.post { menu.page = menu.page?.copy(subtitle = getString(R.string.copying_disc, pct), progress = pct / 100f) } }
                         }
                         cue.path to ByteArray(0)
-                    } finally { withContext(Dispatchers.Main) { progress.dismiss() } }
+                    } finally { withContext(Dispatchers.Main) { closeMenu() } }
                 } else {
                     val name = intent.getStringExtra(EXTRA_NAME) ?: "game.nes"
                     name to LibraryScanner.loadRom(this@GameActivity, Uri.parse(intent.getStringExtra(EXTRA_URI)), intent.getStringExtra(EXTRA_ENTRY))
@@ -280,9 +308,23 @@ class GameActivity : ComponentActivity() {
     }
 
     private fun fail(msg: String) {
-        AlertDialog.Builder(this).setTitle(R.string.cant_start).setMessage(msg).setCancelable(false)
-            .setPositiveButton(R.string.back_to_library) { _, _ -> finish() }.show()
+        openPage(MenuPage(getString(R.string.cant_start), msg,
+            listOf(MenuEntry(getString(R.string.back_to_library), Icons.AutoMirrored.Filled.ArrowBack) { finish() }),
+            onBack = { finish() }, tag = "fail"))
     }
+
+    private val touchStick = arrayOf(0 to 0, 0 to 0)
+    private val padStick = arrayOf(0 to 0, 0 to 0)
+
+    /** A physical stick wins over the touch stick while it is deflected. */
+    private fun pushAnalog(stick: Int) {
+        if (!loaded) return
+        val p = padStick[stick]; val t = touchStick[stick]
+        val v = if (p.first != 0 || p.second != 0) p else t
+        NativeBridge.nativeSetAnalog(0, stick, v.first, v.second)
+    }
+
+    private fun clearAnalog() { for (s in 0..1) { touchStick[s] = 0 to 0; padStick[s] = 0 to 0; if (loaded) NativeBridge.nativeSetAnalog(0, s, 0, 0) } }
 
     private fun pushInput() { if (loaded) NativeBridge.nativeSetInput(0, touchMask or padMask or qaMask) }
     private fun toast(res: Int, vararg a: Any) = Toast.makeText(this, getString(res, *a), Toast.LENGTH_SHORT).show()
@@ -335,94 +377,130 @@ class GameActivity : ComponentActivity() {
     /** Slot chooser: thumbnail + time per slot. Saving to a used slot asks before overwriting. */
     private fun showSlots(saving: Boolean) {
         val slots = (if (saving) SaveSlots.MANUAL.toList() else listOf(SaveSlots.AUTO) + SaveSlots.MANUAL)
-        val dp = resources.displayMetrics.density
-        val adapter = object : BaseAdapter() {
-            override fun getCount() = slots.size
-            override fun getItem(p: Int) = slots[p]
-            override fun getItemId(p: Int) = p.toLong()
-            override fun getView(p: Int, v: View?, parent: ViewGroup?): View {
-                val slot = slots[p]
-                val f = SaveSlots.state(this@GameActivity, gameId, slot)
-                val health = SaveSlots.health(this@GameActivity, gameId, slot)
-                val row = LinearLayout(this@GameActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                    setPadding((20 * dp).toInt(), (10 * dp).toInt(), (20 * dp).toInt(), (10 * dp).toInt())
+        val items = slots.map { slot ->
+            val health = SaveSlots.health(this, gameId, slot)
+            val f = SaveSlots.state(this, gameId, slot)
+            val sub = when (health) {
+                SaveSlots.Health.EMPTY -> getString(R.string.empty)
+                SaveSlots.Health.CORRUPT -> getString(R.string.damaged)
+                else -> DateUtils.getRelativeTimeSpanString(f.lastModified(), System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
+            }
+            val thumb = SaveSlots.thumb(this, gameId, slot).takeIf { it.exists() && health != SaveSlots.Health.EMPTY }
+            MenuEntry(slotLabel(slot), sub = sub, thumb = thumb, thumbRow = true, danger = health == SaveSlots.Health.CORRUPT) {
+                if (saving) {
+                    if (SaveSlots.exists(this, gameId, slot)) confirmOverwrite(slot) else saveAndClose(slot)
+                } else {
+                    val res = loadSlot(slot); toast(res)
+                    if (res == R.string.game_loaded) closeMenu()
                 }
-                val img = ImageView(this@GameActivity).apply {
-                    layoutParams = LinearLayout.LayoutParams((112 * dp).toInt(), (84 * dp).toInt())
-                    scaleType = ImageView.ScaleType.CENTER_CROP
-                    setBackgroundColor(0xFF202020.toInt())
-                    SaveSlots.thumb(this@GameActivity, gameId, slot).takeIf { it.exists() && health != SaveSlots.Health.EMPTY }?.let { setImageURI(Uri.fromFile(it)) }
-                }
-                val line2 = when (health) {
-                    SaveSlots.Health.EMPTY -> getString(R.string.empty)
-                    SaveSlots.Health.CORRUPT -> getString(R.string.damaged)
-                    else -> DateUtils.getRelativeTimeSpanString(f.lastModified(), System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
-                }
-                val txt = TextView(this@GameActivity).apply { text = "${slotLabel(slot)}\n$line2"; textSize = 16f; setPadding((16 * dp).toInt(), 0, (16 * dp).toInt(), 0) }
-                row.addView(img); row.addView(txt)
-                return row
             }
         }
-        AlertDialog.Builder(this).setTitle(if (saving) R.string.save_game else R.string.load_game).setAdapter(adapter) { _, which ->
-            val slot = slots[which]
-            if (saving) {
-                val doSave = { if (saveSlot(slot)) toast(R.string.saved_to, slot) else toast(R.string.save_failed) }
-                if (SaveSlots.exists(this, gameId, slot))
-                    AlertDialog.Builder(this).setMessage(getString(R.string.overwrite_q, slot)).setNegativeButton(R.string.cancel, null)
-                        .setPositiveButton(R.string.overwrite) { _, _ -> doSave() }.showPaused()
-                else doSave()
-            } else toast(loadSlot(slot))
-        }.setNegativeButton(R.string.back, null).showPaused()
+        val back = { openPage(pauseRoot(if (saving) 1 else 2)) }
+        openPage(MenuPage(getString(if (saving) R.string.save_game else R.string.load_game).trimEnd('…', '.'), gameTitle,
+            items + backItem(back), onBack = back, tag = if (saving) "save" else "load"))
     }
 
-    // ---------------------------------------------------------------- menus
+    private fun saveAndClose(slot: Int) {
+        if (saveSlot(slot)) { toast(R.string.saved_to, slot); closeMenu() } else toast(R.string.save_failed)
+    }
 
-    private fun AlertDialog.Builder.showPaused(): AlertDialog = create().also { d ->
-        dialogDepth++; controls.releaseAll(); padMask = 0; pushInput(); applyPause()
-        d.setOnDismissListener { dialogDepth--; applyPause() }
-        d.show()
+    private fun confirmOverwrite(slot: Int) {
+        val back = { showSlots(saving = true) }
+        openPage(MenuPage(getString(R.string.overwrite_q, slot), gameTitle, listOf(
+            MenuEntry(getString(R.string.overwrite), Icons.Filled.Warning, danger = true) { saveAndClose(slot) },
+            MenuEntry(getString(R.string.cancel), Icons.Filled.Close) { back() }), onBack = back, initial = 1, tag = "overwrite"))
+    }
+
+    // ---------------------------------------------------------------- menus (overlay in the library's style)
+
+    private val menu = MenuState()
+    private lateinit var menuView: ComposeView
+    private var navDir = 0
+    private val gameTitle by lazy {
+        intent.getStringExtra(EXTRA_TITLE) ?: intent.getStringExtra(EXTRA_NAME)?.substringBeforeLast('.') ?: system.label
+    }
+
+    private fun backItem(action: () -> Unit) = MenuEntry(getString(R.string.back), Icons.AutoMirrored.Filled.ArrowBack, action = action)
+
+    /** Opens or switches a menu page. The first page freezes the game and releases every held input. */
+    private fun openPage(p: MenuPage) {
+        if (menu.page == null) { dialogDepth++; controls.releaseAll(); padMask = 0; qaMask = 0; pushInput(); clearAnalog(); applyPause() }
+        menuView.visibility = View.VISIBLE
+        menu.page = p; menu.sel = p.initial.coerceIn(0, maxOf(0, p.items.size - 1))
+        Log.i(QA_TAG, "MENU open '${p.title}' tag=${p.tag} items=${p.items.size}")
+    }
+
+    private fun closeMenu() {
+        if (menu.page == null) return
+        menu.page = null; dialogDepth--; applyPause()
+        Log.i(QA_TAG, "MENU closed")
+        ui.postDelayed({ if (menu.page == null) menuView.visibility = View.GONE }, 260)
+    }
+
+    private fun menuBack() { val p = menu.page ?: return; if (p.blocking) return; p.onBack?.invoke() ?: closeMenu() }
+
+    private fun menuPick(i: Int) {
+        val p = menu.page ?: return
+        val item = p.items.getOrNull(i) ?: return
+        menu.sel = i
+        Log.i(QA_TAG, "MENU pick '${p.title}' #$i '${item.label}'")
+        item.action()
+    }
+
+    /** Gamepad / keyboard: up-down (or L1/R1) move, A or Enter selects, B goes back, Home closes. */
+    private fun menuKey(p: MenuPage, e: KeyEvent) {
+        if (e.action != KeyEvent.ACTION_DOWN) return
+        p.keyCapture?.let { if (e.repeatCount == 0) it(e.keyCode); return }
+        when (e.keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_BUTTON_L1 -> menu.move(-1)
+            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_BUTTON_R1 -> menu.move(1)
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER ->
+                if (e.repeatCount == 0) menuPick(menu.sel)
+            KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_ESCAPE -> if (e.repeatCount == 0) menuBack()
+            KeyEvent.KEYCODE_BUTTON_MODE -> if (loaded && !p.blocking) closeMenu()
+        }
     }
 
     private fun modeName(m: Int) = getString(listOf(R.string.mode_original, R.string.mode_integer, R.string.mode_full, R.string.mode_43)[m.coerceIn(0, 3)])
 
     private fun showMenu() {
         if (!loaded || uiBlocked) return
-        val items = arrayOf(getString(R.string.resume), getString(R.string.save_game), getString(R.string.load_game), getString(R.string.restart),
-            getString(R.string.controls_menu), getString(R.string.screen_fmt, modeName(screenMode)), getString(R.string.exit_library))
-        AlertDialog.Builder(this).setTitle(R.string.paused).setItems(items) { _, which ->
-            when (which) {
-                1 -> showSlots(saving = true)
-                2 -> showSlots(saving = false)
-                3 -> NativeBridge.nativeReset()
-                4 -> showControlsMenu()
-                5 -> {
-                    screenMode = (screenMode + 1) % 4
-                    NativeBridge.nativeSetScaleMode(screenMode)
-                    lifecycleScope.launch { Settings(applicationContext).setScreenMode(screenMode) }
-                    Toast.makeText(this, modeName(screenMode), Toast.LENGTH_SHORT).show()
-                }
-                6 -> finish()
-            }
-        }.showPaused()
+        openPage(pauseRoot(0))
     }
 
-    private fun showControlsMenu() {
+    private fun pauseRoot(initial: Int): MenuPage = MenuPage(gameTitle, "${getString(R.string.paused)}  ·  ${system.label}", listOf(
+        MenuEntry(getString(R.string.resume), Icons.Filled.PlayArrow) { closeMenu() },
+        MenuEntry(getString(R.string.save_game), Icons.Filled.KeyboardArrowDown) { showSlots(saving = true) },
+        MenuEntry(getString(R.string.load_game), Icons.Filled.KeyboardArrowUp) { showSlots(saving = false) },
+        MenuEntry(getString(R.string.restart), Icons.Filled.Refresh) { NativeBridge.nativeReset(); closeMenu() },
+        MenuEntry(getString(R.string.controls_menu), Icons.Filled.Build) { showControlsMenu(0) },
+        MenuEntry(getString(R.string.screen_fmt, modeName(screenMode)), Icons.Filled.Settings) {
+            screenMode = (screenMode + 1) % 4
+            NativeBridge.nativeSetScaleMode(screenMode)
+            lifecycleScope.launch { Settings(applicationContext).setScreenMode(screenMode) }
+            openPage(pauseRoot(5))
+        },
+        MenuEntry(getString(R.string.exit_library), Icons.AutoMirrored.Filled.ExitToApp) { finish() }),
+        initial = initial, tag = "pause")
+
+    private fun showControlsMenu(initial: Int) {
         val shown = controls.alpha > 0f
-        val items = arrayOf(getString(R.string.edit_layout), getString(if (layout.haptic) R.string.haptic_on else R.string.haptic_off),
-            getString(if (shown) R.string.hide_touch else R.string.show_touch), getString(R.string.remap),
-            getString(R.string.export_preset), getString(R.string.import_preset), getString(R.string.reset_default))
-        AlertDialog.Builder(this).setTitle(R.string.controls_menu).setItems(items) { _, which ->
-            when (which) {
-                0 -> startEdit()
-                1 -> { layout.haptic = !layout.haptic; LayoutStore.save(this, layout); showControlsMenu() }
-                2 -> controls.alpha = if (shown) 0f else 1f
-                3 -> showRemap()
-                4 -> exportLauncher.launch("nesgames-${system.name.lowercase()}-layout.txt")
-                5 -> importLauncher.launch(arrayOf("text/*", "application/octet-stream"))
-                6 -> { layout.reset(); controls.invalidate(); LayoutStore.save(this, layout); toast(R.string.layout_reset) }
-            }
-        }.setNegativeButton(R.string.back, null).showPaused()
+        val back = { openPage(pauseRoot(4)) }
+        openPage(MenuPage(getString(R.string.controls_menu).trimEnd('…', '.'), gameTitle, listOf(
+            MenuEntry(getString(R.string.edit_layout), Icons.Filled.Edit) { startEdit(); closeMenu() },
+            MenuEntry(getString(if (layout.haptic) R.string.haptic_on else R.string.haptic_off), Icons.Filled.Notifications) {
+                layout.haptic = !layout.haptic; LayoutStore.save(this, layout); showControlsMenu(1)
+            },
+            MenuEntry(getString(if (shown) R.string.hide_touch else R.string.show_touch), if (shown) Icons.Filled.Close else Icons.Filled.Check) {
+                controls.alpha = if (shown) 0f else 1f; showControlsMenu(2)
+            },
+            MenuEntry(getString(R.string.remap), Icons.Filled.Settings) { showRemap(0) },
+            MenuEntry(getString(R.string.export_preset), Icons.Filled.Share) { closeMenu(); exportLauncher.launch("nesgames-${system.name.lowercase()}-layout.txt") },
+            MenuEntry(getString(R.string.import_preset), Icons.Filled.Add) { closeMenu(); importLauncher.launch(arrayOf("text/*", "application/octet-stream")) },
+            MenuEntry(getString(R.string.reset_default), Icons.Filled.Refresh) {
+                layout.reset(); controls.invalidate(); LayoutStore.save(this, layout); toast(R.string.layout_reset); showControlsMenu(6)
+            },
+        ) + backItem(back), onBack = back, initial = initial, tag = "controls"))
     }
 
     // ---------------------------------------------------------------- layout editor
@@ -465,28 +543,28 @@ class GameActivity : ComponentActivity() {
             getString(R.string.d_left) to RetroPad.LEFT, getString(R.string.d_right) to RetroPad.RIGHT) +
             layout.elems.filter { it.spec.retro >= 0 }.map { it.spec.label to it.spec.retro }
 
-    private fun showRemap() {
+    private fun showRemap(initial: Int) {
         val targets = remapTargets()
-        val items = (targets.map { "${it.first}   ←   ${keyName(padMap.keyFor(it.second))}" } + getString(R.string.remap_reset)).toTypedArray()
-        AlertDialog.Builder(this).setTitle(R.string.remap).setItems(items) { _, which ->
-            if (which == targets.size) { LayoutStore.resetMap(this, system); padMap = PadMap(); showRemap() }
-            else captureKey(targets[which].first, targets[which].second)
-        }.setNegativeButton(R.string.back, null).showPaused()
+        val back = { showControlsMenu(3) }
+        val items = targets.mapIndexed { k, t -> MenuEntry(t.first, sub = keyName(padMap.keyFor(t.second))) { captureKey(k, t.first, t.second) } } +
+            MenuEntry(getString(R.string.remap_reset), Icons.Filled.Refresh) { LayoutStore.resetMap(this, system); padMap = PadMap(); showRemap(targets.size) } +
+            backItem(back)
+        openPage(MenuPage(getString(R.string.remap), gameTitle, items, onBack = back, initial = initial, tag = "remap"))
     }
 
-    private fun captureKey(label: String, retro: Int) {
-        val b = AlertDialog.Builder(this).setMessage(getString(R.string.press_button, label)).setNegativeButton(R.string.cancel, null)
-        b.setOnKeyListener { d, code, ev ->
-            if (ev.action == KeyEvent.ACTION_DOWN && code != KeyEvent.KEYCODE_BACK) {
+    /** Waits for one controller button (everything except Back) and binds it. */
+    private fun captureKey(index: Int, label: String, retro: Int) {
+        val back = { showRemap(index) }
+        openPage(MenuPage(label, getString(R.string.press_button, label), listOf(MenuEntry(getString(R.string.cancel), Icons.Filled.Close) { back() }),
+            onBack = back, tag = "capture", keyCapture = { code ->
                 padMap.bind(code, retro); LayoutStore.saveMap(this, system, padMap)
                 Log.i(QA_TAG, "REMAP ${keyName(code)} -> $label($retro)")
-                d.dismiss(); showRemap(); true
-            } else false
-        }
-        b.showPaused()
+                showRemap(index)
+            }))
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        menu.page?.let { p -> if (event.keyCode != KeyEvent.KEYCODE_BACK) { menuKey(p, event); return true } }
         if (uiBlocked) return super.dispatchKeyEvent(event)
         if (event.keyCode == KeyEvent.KEYCODE_BUTTON_MODE) { if (event.action == KeyEvent.ACTION_DOWN) showMenu(); return true }
         val id = padMap.lookup(event.keyCode)
@@ -498,7 +576,31 @@ class GameActivity : ComponentActivity() {
     }
 
     override fun onGenericMotionEvent(e: MotionEvent): Boolean {
+        if (menu.page != null) {   // stick / hat moves the menu selection, one step per push
+            if (e.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK && e.action == MotionEvent.ACTION_MOVE) {
+                val y = e.getAxisValue(MotionEvent.AXIS_HAT_Y).let { if (it == 0f) e.getAxisValue(MotionEvent.AXIS_Y) else it }
+                val d = if (y < -0.5f) -1 else if (y > 0.5f) 1 else 0
+                if (d != 0 && d != navDir && menu.page?.keyCapture == null) menu.move(d)
+                navDir = d
+            }
+            return true
+        }
         if (uiBlocked || e.source and InputDevice.SOURCE_JOYSTICK != InputDevice.SOURCE_JOYSTICK || e.action != MotionEvent.ACTION_MOVE) return super.onGenericMotionEvent(e)
+        if (system == GameSystem.PS2) {
+            fun ax(a: Int) = e.getAxisValue(a).let { if (kotlin.math.abs(it) < 0.12f) 0 else (it * 32767).toInt() }   // dead zone
+            padStick[0] = ax(MotionEvent.AXIS_X) to ax(MotionEvent.AXIS_Y)
+            padStick[1] = ax(MotionEvent.AXIS_Z) to ax(MotionEvent.AXIS_RZ)
+            pushAnalog(0); pushAnalog(1)
+            val lt = maxOf(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE)) > 0.5f
+            val rt = maxOf(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS)) > 0.5f
+            var m = padMask and (RetroPad.bit(RetroPad.L2) or RetroPad.bit(RetroPad.R2) or RetroPad.bit(RetroPad.UP) or RetroPad.bit(RetroPad.DOWN) or RetroPad.bit(RetroPad.LEFT) or RetroPad.bit(RetroPad.RIGHT)).inv()
+            if (lt) m = m or RetroPad.bit(RetroPad.L2); if (rt) m = m or RetroPad.bit(RetroPad.R2)
+            val hx = e.getAxisValue(MotionEvent.AXIS_HAT_X); val hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y)
+            if (hx < -0.5f) m = m or RetroPad.bit(RetroPad.LEFT); if (hx > 0.5f) m = m or RetroPad.bit(RetroPad.RIGHT)
+            if (hy < -0.5f) m = m or RetroPad.bit(RetroPad.UP); if (hy > 0.5f) m = m or RetroPad.bit(RetroPad.DOWN)
+            padMask = m; pushInput()
+            return true
+        }
         val x = e.getAxisValue(MotionEvent.AXIS_HAT_X).let { if (it == 0f) e.getAxisValue(MotionEvent.AXIS_X) else it }
         val y = e.getAxisValue(MotionEvent.AXIS_HAT_Y).let { if (it == 0f) e.getAxisValue(MotionEvent.AXIS_Y) else it }
         val dirs = RetroPad.bit(RetroPad.UP) or RetroPad.bit(RetroPad.DOWN) or RetroPad.bit(RetroPad.LEFT) or RetroPad.bit(RetroPad.RIGHT)
@@ -514,13 +616,13 @@ class GameActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideBars()
-        else { controls.releaseAll(); padMask = 0; qaMask = 0; pushInput() }   // never leave a button held behind a dialog or another window
+        else { controls.releaseAll(); padMask = 0; qaMask = 0; pushInput(); clearAnalog() }   // never leave a button held behind a dialog or another window
     }
 
     override fun onPause() {
         super.onPause()
         resumedState = false
-        controls.releaseAll(); padMask = 0; qaMask = 0; pushInput()
+        controls.releaseAll(); padMask = 0; qaMask = 0; pushInput(); clearAnalog()
         // Order matters for GPU cores (PS2): their state is saved on the GL thread, so it must still be running.
         if (loaded) {
             NativeBridge.nativeSetPaused(true)
@@ -543,7 +645,6 @@ class GameActivity : ComponentActivity() {
         ui.removeCallbacksAndMessages(null)
         if (BuildConfig.DEBUG) runCatching { unregisterReceiver(qaReceiver) }
         if (loaded) { NativeBridge.nativeUnload(); loaded = false }
-        runCatching { discFd?.close() }
         super.onDestroy()
     }
 
@@ -569,8 +670,34 @@ class GameActivity : ComponentActivity() {
             "reset_layout" -> { layout.reset(); controls.invalidate(); LayoutStore.save(this, layout); Log.i(QA_TAG, "QA layout reset") }
             "haptic" -> { layout.haptic = n != 0; LayoutStore.save(this, layout); Log.i(QA_TAG, "QA haptic=${layout.haptic}") }
             "touch2" -> qaMultiTouch()
+            "stick" -> qaStick()
             else -> Log.i(QA_TAG, "QA unknown cmd $cmd")
         }
+    }
+
+    /** Left stick + a face button held together through the real view; checks values, release and spring-back. */
+    private fun qaStick() {
+        val g = controls.geom
+        val st = layout.elem("LSTICK") ?: run { Log.i(QA_TAG, "STICK n/a for $system"); return }
+        val face = layout.elems.first { it.spec.shape == Shape.CIRCLE }
+        val t0 = SystemClock.uptimeMillis()
+        fun ev(action: Int, idx: Int, vararg pts: Triple<Int, Float, Float>) {
+            val props = Array(pts.size) { MotionEvent.PointerProperties().apply { id = pts[it].first; toolType = MotionEvent.TOOL_TYPE_FINGER } }
+            val coords = Array(pts.size) { MotionEvent.PointerCoords().apply { x = pts[it].second; y = pts[it].third; pressure = 1f; size = 1f } }
+            val m = MotionEvent.obtain(t0, SystemClock.uptimeMillis(), action or (idx shl MotionEvent.ACTION_POINTER_INDEX_SHIFT), pts.size, props, coords, 0, 0, 1f, 1f, 78, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+            controls.dispatchTouchEvent(m); m.recycle()
+        }
+        val r = g.r(st); val sx = g.cx(st); val sy = g.cy(st)
+        val a = Triple(0, sx, sy); val right = Triple(0, sx + r * 2f, sy); val upLeft = Triple(0, sx - r * 0.5f, sy - r * 0.5f)
+        val b = Triple(1, g.cx(face), g.cy(face))
+        fun log(name: String) = Log.i(QA_TAG, "STICK $name value=${controls.stickValue(0)} mask=${controls.currentMask}")
+        ev(MotionEvent.ACTION_DOWN, 0, a); log("centre (dead zone)")
+        ev(MotionEvent.ACTION_MOVE, 0, right); log("full right (clamped)")
+        ev(MotionEvent.ACTION_POINTER_DOWN, 1, right, b); log("+face button held")
+        ev(MotionEvent.ACTION_MOVE, 0, upLeft, b); log("half up-left while button held")
+        ev(MotionEvent.ACTION_POINTER_UP, 0, upLeft, b); log("stick finger lifted -> centre, button still held")
+        ev(MotionEvent.ACTION_UP, 0, b); log("all lifted")
+        ev(MotionEvent.ACTION_DOWN, 0, right); ev(MotionEvent.ACTION_CANCEL, 0, right); log("cancel -> centre")
     }
 
     /** Dispatches synthetic multi-pointer events through the real view (adb cannot inject two fingers). */

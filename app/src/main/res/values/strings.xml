@@ -38,6 +38,7 @@
     <string name="overwrite">Overwrite</string>
     <string name="cancel">Cancel</string>
     <string name="back">Back</string>
+    <string name="menu_select">Select</string>
     <string name="saved_to">Saved to slot %1$d</string>
     <string name="save_failed">Save failed</string>
     <string name="game_loaded">Game loaded</string>
@@ -87,4 +88,9 @@
     <string name="d_left">Left</string>
     <string name="d_right">Right</string>
     <string name="ps2_bios_missing">PlayStation 2 needs a BIOS from your own PS2 console. Put the BIOS file (4 MB .bin) in Download/nesGames/BIOS, then open the library again.</string>
+    <string name="bios_title">PS2 BIOS</string>
+    <string name="bios_help">Copy a BIOS dumped from your own PlayStation 2 (4 MB .bin) into Download/nesGames/BIOS. nesGames checks it and copies it into the app. BIOS files are never downloaded.</string>
+    <string name="bios_none">No PS2 BIOS installed yet.</string>
+    <string name="bios_invalid">not a PS2 BIOS</string>
+    <string name="bios_rescan">Re-scan</string>
 </resources>

@@ -196,6 +196,7 @@ class MainActivity : ComponentActivity() {
                 .putExtra(GameActivity.EXTRA_RESUME, resume)
                 .putExtra(GameActivity.EXTRA_ENTRY, g.zipEntry)
                 .putExtra(GameActivity.EXTRA_NAME, g.fileName)
+                .putExtra(GameActivity.EXTRA_TITLE, g.title)
                 .putExtra(GameActivity.EXTRA_SYSTEM, g.system.name)
                 .apply { if (g.dirUri != null) { putExtra(GameActivity.EXTRA_DIR, g.dirUri.toString()); putExtra(GameActivity.EXTRA_DISC_FILES, g.discFiles.toTypedArray()) } })
             @Suppress("DEPRECATION") overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
@@ -230,8 +231,17 @@ class MainActivity : ComponentActivity() {
                 BoxWithConstraints(Modifier.fillMaxSize().displayCutoutPadding().padding(horizontal = 36.dp, vertical = 18.dp)) {
                     val tile = minOf(170.dp, maxHeight * 0.42f)   // scales down on short landscape screens
                     Column {
-                        TopBar(tabs, tab, { tab = it }, scanning, onRefresh = { rescan(tree) },
-                            onSearch = { searching = !searching; if (!searching) query = "" }, onFolder = { picker.launch(hint) })
+                        var menuOpen by remember { mutableStateOf(false) }
+                        var biosOpen by remember { mutableStateOf(false) }
+                        Box {
+                            TopBar(tabs, tab, { tab = it }, scanning, onRefresh = { rescan(tree) },
+                                onSearch = { searching = !searching; if (!searching) query = "" }, onFolder = { menuOpen = true })
+                            DropdownMenu(menuOpen, { menuOpen = false }, Modifier.align(Alignment.TopEnd)) {
+                                DropdownMenuItem(text = { Text(stringResource(R.string.select_folder)) }, onClick = { menuOpen = false; picker.launch(hint) })
+                                DropdownMenuItem(text = { Text(stringResource(R.string.bios_title)) }, onClick = { menuOpen = false; biosOpen = true })
+                            }
+                        }
+                        if (biosOpen) BiosDialog(onRescan = { rescan(tree) }, onClose = { biosOpen = false })
                         AnimatedVisibility(searching) {
                             BasicTextField(query, { query = it }, singleLine = true, cursorBrush = SolidColor(Color.White),
                                 textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
@@ -262,6 +272,27 @@ class MainActivity : ComponentActivity() {
 
             AnimatedVisibility(splash, enter = fadeIn(), exit = fadeOut(tween(500)) + scaleOut(targetScale = 1.15f)) { Splash() }
         }
+    }
+
+    @Composable
+    private fun BiosDialog(onRescan: () -> Unit, onClose: () -> Unit) {
+        var version by remember { mutableIntStateOf(0) }
+        val list by produceState(emptyList<Ps2Bios.Info>(), version) { value = withContext(Dispatchers.IO) { Ps2Bios.installed(applicationContext) } }
+        AlertDialog(onDismissRequest = onClose,
+            title = { Text(stringResource(R.string.bios_title)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.bios_help), fontSize = 14.sp)
+                    Spacer(Modifier.height(12.dp))
+                    if (list.isEmpty()) Text(stringResource(R.string.bios_none), fontWeight = FontWeight.Bold)
+                    for (b in list) Text(
+                        if (b.valid) "✓ ${b.file.name} · PS2 BIOS ${b.version ?: "?"} · ${b.region ?: "?"} · ${b.date ?: "?"}"
+                        else "✗ ${b.file.name} · ${stringResource(R.string.bios_invalid)}", fontSize = 14.sp)
+                }
+            },
+            confirmButton = { TextButton(onClick = { onRescan(); version++ }) { Text(stringResource(R.string.bios_rescan)) } },
+            dismissButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.back)) } })
+        LaunchedEffect(Unit) { while (true) { delay(1500); version++ } }   // picks up the result of the rescan
     }
 
     @Composable

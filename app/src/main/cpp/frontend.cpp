@@ -104,6 +104,7 @@ struct State {
     bool newFrame = false;
 
     std::atomic<uint32_t> input[2]{{0}, {0}};
+    std::atomic<int16_t> analog[2][2][2]{};   // [port][stick: 0 left, 1 right][axis: 0 x, 1 y], -32767..32767
     std::atomic<bool> running{false}, paused{false};
     std::thread emuThread;
 
@@ -286,8 +287,13 @@ void audioSample(int16_t l, int16_t r) {
 
 void inputPoll() {}
 
-int16_t inputState(unsigned port, unsigned device, unsigned, unsigned id) {
-    if (port > 1 || device != RETRO_DEVICE_JOYPAD) return 0;
+int16_t inputState(unsigned port, unsigned device, unsigned index, unsigned id) {
+    if (port > 1) return 0;
+    if (device == RETRO_DEVICE_ANALOG) {
+        if (index > 1 || id > 1) return 0;   // index 2 = analog buttons: not provided
+        return g.analog[port][index][id].load(std::memory_order_relaxed);
+    }
+    if (device != RETRO_DEVICE_JOYPAD) return 0;
     uint32_t m = g.input[port].load(std::memory_order_relaxed);
     if (id == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t) m;
     return (int16_t) ((m >> id) & 1);
@@ -570,6 +576,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeS
     g.paused = p;
     if (p) { std::lock_guard<std::mutex> lk(g.coreMutex); }   // wait for an in-flight frame: state is frozen when this returns
     if (g.stream) { if (p) AAudioStream_requestPause(g.stream); else AAudioStream_requestStart(g.stream); }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetAnalog(JNIEnv *, jobject, jint port, jint stick, jint x, jint y) {
+    if (port < 0 || port > 1 || stick < 0 || stick > 1) return;
+    auto clamp = [](jint v) { return (int16_t) std::max(-32767, std::min(32767, (int) v)); };
+    g.analog[port][stick][0] = clamp(x);
+    g.analog[port][stick][1] = clamp(y);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetInput(JNIEnv *, jobject, jint port, jint mask) { if (port >= 0 && port < 2) g.input[port] = (uint32_t) mask; }

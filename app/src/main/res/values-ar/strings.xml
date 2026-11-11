@@ -38,6 +38,7 @@
     <string name="overwrite">استبدال</string>
     <string name="cancel">إلغاء</string>
     <string name="back">رجوع</string>
+    <string name="menu_select">اختيار</string>
     <string name="saved_to">تم الحفظ في الخانة %1$d</string>
     <string name="save_failed">فشل الحفظ</string>
     <string name="game_loaded">تم تحميل اللعبة</string>
@@ -87,4 +88,9 @@
     <string name="d_left">يسار</string>
     <string name="d_right">يمين</string>
     <string name="ps2_bios_missing">يحتاج بلايستيشن 2 إلى ملف BIOS من جهازك الخاص. ضع ملف BIOS (بحجم 4 ميغابايت .bin) في Download/nesGames/BIOS ثم افتح المكتبة مرة أخرى.</string>
+    <string name="bios_title">BIOS بلايستيشن 2</string>
+    <string name="bios_help">انسخ ملف BIOS مستخرجاً من جهاز بلايستيشن 2 الخاص بك (‏.bin بحجم 4 ميغابايت) إلى Download/nesGames/BIOS. يتحقق nesGames منه وينسخه داخل التطبيق. لا يتم تنزيل ملفات BIOS أبداً.</string>
+    <string name="bios_none">لا يوجد BIOS لبلايستيشن 2 بعد.</string>
+    <string name="bios_invalid">ليس BIOS لبلايستيشن 2</string>
+    <string name="bios_rescan">إعادة الفحص</string>
 </resources>
