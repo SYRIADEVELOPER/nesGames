@@ -93,4 +93,7 @@
     <string name="bios_none">لا يوجد BIOS لبلايستيشن 2 بعد.</string>
     <string name="bios_invalid">ليس BIOS لبلايستيشن 2</string>
     <string name="bios_rescan">إعادة الفحص</string>
+    <string name="move_dpad">الحركة: مربعات الاتجاه</string>
+    <string name="move_stick">الحركة: جويستك</string>
+    <string name="move_hint">اضغط للتبديل بين مربعات الاتجاه والجويستك</string>
 </resources>

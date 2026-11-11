@@ -139,4 +139,25 @@ class PadLayoutTest {
         assertEquals(SaveSlots.Health.CORRUPT, SaveSlots.health(st, meta))
         dir.deleteRecursively()
     }
+
+    @Test fun dpadJoystickGivesEightWaysAndIgnoresTaps() {
+        for (s in listOf(GameSystem.NES, GameSystem.MD, GameSystem.PS1, GameSystem.PS2)) {
+            val (l, g) = geo(s); val d = l.elem("DPAD")!!; val R = g.dpadStickR(d)
+            assertNull("${s.name}: D-pad is not a stick by default", g.stickAt(g.cx(d), g.cy(d)))
+            l.dpadStick = true
+            assertSame(d, g.stickAt(g.cx(d) + R * 0.5f, g.cy(d)))
+            assertEquals(0, g.maskAt(g.cx(d) + R * 0.6f, g.cy(d)))            // taps no longer hit the squares
+            assertEquals(0, g.dpadStickMask(d, g.cx(d) + R * 0.2f, g.cy(d)))  // dead zone
+            assertEquals(RIGHT, g.dpadStickMask(d, g.cx(d) + R * 3f, g.cy(d))) // beyond the edge still counts
+            assertEquals(UP or RetroPad.bit(RetroPad.LEFT), g.dpadStickMask(d, g.cx(d) - R * 0.6f, g.cy(d) - R * 0.6f))
+            val k = g.dpadStickKnob(d, g.cx(d) + R * 3f, g.cy(d)); assertEquals(R, k.first, 0.5f)
+        }
+    }
+
+    @Test fun movementStyleIsSavedAndOldPresetsStayDpad() {
+        val l = PadLayout(GameSystem.MD); l.dpadStick = true
+        assertTrue(PadLayout.parse(l.serialize(), GameSystem.MD)!!.dpadStick)
+        val old = l.serialize().lines().filterNot { it.startsWith("dpadStick") }.joinToString("\n")
+        assertFalse(PadLayout.parse(old, GameSystem.MD)!!.dpadStick)
+    }
 }

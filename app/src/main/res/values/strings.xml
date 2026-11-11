@@ -93,4 +93,7 @@
     <string name="bios_none">No PS2 BIOS installed yet.</string>
     <string name="bios_invalid">not a PS2 BIOS</string>
     <string name="bios_rescan">Re-scan</string>
+    <string name="move_dpad">Movement: D-pad</string>
+    <string name="move_stick">Movement: Joystick</string>
+    <string name="move_hint">Tap to switch between D-pad squares and a joystick</string>
 </resources>

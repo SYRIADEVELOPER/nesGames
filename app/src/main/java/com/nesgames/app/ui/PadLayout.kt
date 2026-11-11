@@ -27,6 +27,8 @@ class PadLayout(val system: GameSystem) {
     var opacity = 0.55f
     var dpadSpread = 1f
     var haptic = false
+    /** Movement style: false = D-pad squares, true = a joystick in the D-pad's place giving the same 8 directions. */
+    var dpadStick = false
 
     fun reset() {
         elems.forEach { it.dx = it.spec.dx; it.dy = it.spec.dy; it.scale = 1f }
@@ -42,6 +44,7 @@ class PadLayout(val system: GameSystem) {
         append("opacity $opacity\n")
         append("dpadSpread $dpadSpread\n")
         append("haptic ${if (haptic) 1 else 0}\n")
+        append("dpadStick ${if (dpadStick) 1 else 0}\n")
         for (e in elems) append("elem ${e.spec.id} ${e.dx} ${e.dy} ${e.scale}\n")
     }
 
@@ -62,6 +65,7 @@ class PadLayout(val system: GameSystem) {
                     "opacity" -> out.opacity = (p.getOrNull(1)?.toFloatOrNull() ?: return null).coerceIn(0.15f, 1f)
                     "dpadSpread" -> out.dpadSpread = (p.getOrNull(1)?.toFloatOrNull() ?: return null).coerceIn(0.7f, 1.6f)
                     "haptic" -> out.haptic = p.getOrNull(1) == "1"
+                    "dpadStick" -> out.dpadStick = p.getOrNull(1) == "1"   // absent in older presets: D-pad
                     "elem" -> {
                         if (p.size != 5) return null
                         val e = out.elem(p[1]) ?: continue
@@ -135,10 +139,44 @@ class Geometry(val layout: PadLayout, val w: Float, val h: Float) {
         return hypot((x - cx(e)) / k, y - cy(e))
     }
 
-    private fun dpadReach(e: Elem) = r(e) * (0.73f + 0.62f * layout.dpadSpread)
+    fun dpadReach(e: Elem) = r(e) * (0.73f + 0.62f * layout.dpadSpread)
 
-    /** The stick whose area contains (x, y), if any (grab radius 1.4 r). */
-    fun stickAt(x: Float, y: Float): Elem? = layout.elems.firstOrNull { it.spec.shape == Shape.STICK && hypot(x - cx(it), y - cy(it)) <= r(it) * 1.4f }
+    /** Radius of the D-pad when it is drawn and used as a joystick. */
+    fun dpadStickR(e: Elem) = r(e) * 1.15f
+
+    /** The stick whose area contains (x, y), if any: analog sticks (grab radius 1.4 r) and, in joystick mode, the D-pad. */
+    fun stickAt(x: Float, y: Float): Elem? = layout.elems.firstOrNull {
+        when (it.spec.shape) {
+            Shape.STICK -> hypot(x - cx(it), y - cy(it)) <= r(it) * 1.4f
+            Shape.DPAD -> layout.dpadStick && hypot(x - cx(it), y - cy(it)) <= dpadStickR(it) * 1.3f
+            else -> false
+        }
+    }
+
+    /** D-pad joystick: 8-way directions from the finger's offset; dead zone 30 % of the radius. */
+    fun dpadStickMask(e: Elem, x: Float, y: Float): Int {
+        val dx = x - cx(e); val dy = y - cy(e)
+        if (hypot(dx, dy) < dpadStickR(e) * 0.30f) return 0
+        return dirMask(dx, dy)
+    }
+
+    /** Knob offset for drawing the D-pad joystick, clamped to its radius. */
+    fun dpadStickKnob(e: Elem, x: Float, y: Float): Pair<Float, Float> {
+        val R = dpadStickR(e); var dx = x - cx(e); var dy = y - cy(e)
+        val len = hypot(dx, dy); if (len > R) { dx = dx / len * R; dy = dy / len * R }
+        return dx to dy
+    }
+
+    private fun dirMask(dx: Float, dy: Float): Int {
+        // 8-way: 45° sectors around each axis give diagonals
+        val ang = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).let { if (it < 0) it + 360 else it }
+        var m = 0
+        if (ang < 67.5 || ang > 292.5) m = m or RetroPad.bit(RetroPad.RIGHT)
+        if (ang in 22.5..157.5) m = m or RetroPad.bit(RetroPad.DOWN)
+        if (ang in 112.5..247.5) m = m or RetroPad.bit(RetroPad.LEFT)
+        if (ang in 202.5..337.5) m = m or RetroPad.bit(RetroPad.UP)
+        return m
+    }
 
     /** Stick deflection for a finger at (x, y): -32767..32767 per axis, clamped to the stick radius, +y = down. */
     fun stickValue(e: Elem, x: Float, y: Float): Pair<Int, Int> {
@@ -156,18 +194,11 @@ class Geometry(val layout: PadLayout, val w: Float, val h: Float) {
         var best: Elem? = null; var bestD = Float.MAX_VALUE
         for (e in layout.elems) {
             when (e.spec.shape) {
-                Shape.DPAD -> {
+                Shape.DPAD -> if (!layout.dpadStick) {   // in joystick mode the D-pad is steered via stickAt
                     val d = hypot(x - cx(e), y - cy(e))
                     if (d <= dpadReach(e)) {
                         if (d < r(e) * 0.22f) return 0
-                        // 8-way: 45° sectors around each axis give diagonals
-                        val ang = Math.toDegrees(atan2((y - cy(e)).toDouble(), (x - cx(e)).toDouble())).let { if (it < 0) it + 360 else it }
-                        var m = 0
-                        if (ang < 67.5 || ang > 292.5) m = m or RetroPad.bit(RetroPad.RIGHT)
-                        if (ang in 22.5..157.5) m = m or RetroPad.bit(RetroPad.DOWN)
-                        if (ang in 112.5..247.5) m = m or RetroPad.bit(RetroPad.LEFT)
-                        if (ang in 202.5..337.5) m = m or RetroPad.bit(RetroPad.UP)
-                        return m
+                        return dirMask(x - cx(e), y - cy(e))
                     }
                 }
                 Shape.MENU, Shape.STICK -> {}

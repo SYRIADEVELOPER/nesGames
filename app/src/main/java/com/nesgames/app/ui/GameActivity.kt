@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
@@ -488,17 +489,23 @@ class GameActivity : ComponentActivity() {
         val back = { openPage(pauseRoot(4)) }
         openPage(MenuPage(getString(R.string.controls_menu).trimEnd('…', '.'), gameTitle, listOf(
             MenuEntry(getString(R.string.edit_layout), Icons.Filled.Edit) { startEdit(); closeMenu() },
+            MenuEntry(getString(if (layout.dpadStick) R.string.move_stick else R.string.move_dpad), Icons.Filled.Place,
+                sub = getString(R.string.move_hint)) {
+                layout.dpadStick = !layout.dpadStick; controls.releaseAll(); controls.invalidate(); LayoutStore.save(this, layout)
+                Log.i(QA_TAG, "MOVE style=${if (layout.dpadStick) "joystick" else "dpad"} system=$system")
+                showControlsMenu(1)
+            },
             MenuEntry(getString(if (layout.haptic) R.string.haptic_on else R.string.haptic_off), Icons.Filled.Notifications) {
-                layout.haptic = !layout.haptic; LayoutStore.save(this, layout); showControlsMenu(1)
+                layout.haptic = !layout.haptic; LayoutStore.save(this, layout); showControlsMenu(2)
             },
             MenuEntry(getString(if (shown) R.string.hide_touch else R.string.show_touch), if (shown) Icons.Filled.Close else Icons.Filled.Check) {
-                controls.alpha = if (shown) 0f else 1f; showControlsMenu(2)
+                controls.alpha = if (shown) 0f else 1f; showControlsMenu(3)
             },
             MenuEntry(getString(R.string.remap), Icons.Filled.Settings) { showRemap(0) },
             MenuEntry(getString(R.string.export_preset), Icons.Filled.Share) { closeMenu(); exportLauncher.launch("nesgames-${system.name.lowercase()}-layout.txt") },
             MenuEntry(getString(R.string.import_preset), Icons.Filled.Add) { closeMenu(); importLauncher.launch(arrayOf("text/*", "application/octet-stream")) },
             MenuEntry(getString(R.string.reset_default), Icons.Filled.Refresh) {
-                layout.reset(); controls.invalidate(); LayoutStore.save(this, layout); toast(R.string.layout_reset); showControlsMenu(6)
+                layout.reset(); controls.invalidate(); LayoutStore.save(this, layout); toast(R.string.layout_reset); showControlsMenu(7)
             },
         ) + backItem(back), onBack = back, initial = initial, tag = "controls"))
     }
@@ -545,7 +552,7 @@ class GameActivity : ComponentActivity() {
 
     private fun showRemap(initial: Int) {
         val targets = remapTargets()
-        val back = { showControlsMenu(3) }
+        val back = { showControlsMenu(4) }
         val items = targets.mapIndexed { k, t -> MenuEntry(t.first, sub = keyName(padMap.keyFor(t.second))) { captureKey(k, t.first, t.second) } } +
             MenuEntry(getString(R.string.remap_reset), Icons.Filled.Refresh) { LayoutStore.resetMap(this, system); padMap = PadMap(); showRemap(targets.size) } +
             backItem(back)
@@ -671,8 +678,36 @@ class GameActivity : ComponentActivity() {
             "haptic" -> { layout.haptic = n != 0; LayoutStore.save(this, layout); Log.i(QA_TAG, "QA haptic=${layout.haptic}") }
             "touch2" -> qaMultiTouch()
             "stick" -> qaStick()
+            "move_style" -> { layout.dpadStick = n != 0; controls.releaseAll(); controls.invalidate(); LayoutStore.save(this, layout); Log.i(QA_TAG, "MOVE style=${if (layout.dpadStick) "joystick" else "dpad"} system=$system") }
+            "dpadstick" -> qaDpadStick()
             else -> Log.i(QA_TAG, "QA unknown cmd $cmd")
         }
+    }
+
+    /** D-pad in joystick mode, through the real view: centre, right, up-left diagonal while a button is held, lift, cancel. */
+    private fun qaDpadStick() {
+        val g = controls.geom
+        val d = layout.elem("DPAD") ?: return
+        val face = layout.elems.first { it.spec.shape == Shape.CIRCLE }
+        val t0 = SystemClock.uptimeMillis()
+        fun ev(action: Int, idx: Int, vararg pts: Triple<Int, Float, Float>) {
+            val props = Array(pts.size) { MotionEvent.PointerProperties().apply { id = pts[it].first; toolType = MotionEvent.TOOL_TYPE_FINGER } }
+            val coords = Array(pts.size) { MotionEvent.PointerCoords().apply { x = pts[it].second; y = pts[it].third; pressure = 1f; size = 1f } }
+            val m = MotionEvent.obtain(t0, SystemClock.uptimeMillis(), action or (idx shl MotionEvent.ACTION_POINTER_INDEX_SHIFT), pts.size, props, coords, 0, 0, 1f, 1f, 79, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+            controls.dispatchTouchEvent(m); m.recycle()
+        }
+        val R = g.dpadStickR(d); val cx = g.cx(d); val cy = g.cy(d)
+        val dirs = RetroPad.bit(RetroPad.UP) or RetroPad.bit(RetroPad.DOWN) or RetroPad.bit(RetroPad.LEFT) or RetroPad.bit(RetroPad.RIGHT)
+        fun log(name: String, expect: Int) { val m = controls.currentMask and dirs; Log.i(QA_TAG, "DSTICK $name mask=$m expect=$expect ${if (m == expect) "OK" else "MISMATCH"} full=${controls.currentMask}") }
+        val c = Triple(0, cx, cy); val right = Triple(0, cx + R * 2f, cy); val upLeft = Triple(0, cx - R * 0.6f, cy - R * 0.6f)
+        val b = Triple(1, g.cx(face), g.cy(face))
+        ev(MotionEvent.ACTION_DOWN, 0, c); log("centre (dead zone)", 0)
+        ev(MotionEvent.ACTION_MOVE, 0, right); log("pushed right past the edge", RetroPad.bit(RetroPad.RIGHT))
+        ev(MotionEvent.ACTION_POINTER_DOWN, 1, right, b); ev(MotionEvent.ACTION_MOVE, 0, upLeft, b)
+        log("up-left while a face button is held", RetroPad.bit(RetroPad.UP) or RetroPad.bit(RetroPad.LEFT))
+        ev(MotionEvent.ACTION_POINTER_UP, 0, upLeft, b); log("stick finger lifted", 0)
+        ev(MotionEvent.ACTION_UP, 0, b)
+        ev(MotionEvent.ACTION_DOWN, 0, right); ev(MotionEvent.ACTION_CANCEL, 0, right); log("cancel", 0)
     }
 
     /** Left stick + a face button held together through the real view; checks values, release and spring-back. */

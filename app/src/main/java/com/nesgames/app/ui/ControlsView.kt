@@ -32,6 +32,7 @@ class ControlsView(
     private val ignored = HashSet<Long>()     // pointers that opened the menu
     private val stickOwner = HashMap<Long, Elem>()   // pointer -> analog stick it is steering
     private val stickPos = HashMap<Elem, Pair<Int, Int>>()
+    private val knob = HashMap<Elem, Pair<Float, Float>>()   // D-pad joystick knob offset (pixels)
     private var mask = 0
     private val expire = Runnable { publish() }
 
@@ -48,8 +49,8 @@ class ControlsView(
     /** Drops every pointer and latched press and reports mask 0. Safe to call at any time. */
     fun releaseAll() {
         tracker.clear(); ignored.clear(); removeCallbacks(expire)
-        for (e in stickOwner.values.toSet() + stickPos.keys) { onStick(e.spec.retro, 0, 0) }
-        stickOwner.clear(); stickPos.clear()
+        for (e in stickOwner.values.toSet() + stickPos.keys) { if (e.spec.shape == Shape.STICK) onStick(e.spec.retro, 0, 0) }
+        stickOwner.clear(); stickPos.clear(); knob.clear()
         if (mask != 0) { mask = 0; onMask(0) }
         invalidate()
     }
@@ -79,13 +80,13 @@ class ControlsView(
                 val i = e.actionIndex; val x = e.getX(i); val y = e.getY(i)
                 val stick = geom.stickAt(x, y)
                 if (geom.isMenu(x, y)) { ignored += key(e, i); onMenu() }
-                else if (stick != null && stick !in stickOwner.values) { stickOwner[key(e, i)] = stick; moveStick(stick, x, y) }
+                else if (stick != null && stick !in stickOwner.values) { stickOwner[key(e, i)] = stick; moveStick(key(e, i), stick, x, y, now) }
                 else tracker.set(key(e, i), geom.maskAt(x, y), now)
             }
             MotionEvent.ACTION_MOVE -> for (i in 0 until e.pointerCount) {
                 val k = key(e, i)
                 val s = stickOwner[k]
-                if (s != null) moveStick(s, e.getX(i), e.getY(i))
+                if (s != null) moveStick(k, s, e.getX(i), e.getY(i), now)
                 else if (k !in ignored) tracker.set(k, geom.maskAt(e.getX(i), e.getY(i)), now)
             }
             MotionEvent.ACTION_POINTER_UP -> { val k = key(e, e.actionIndex); ignored -= k; liftStick(k); tracker.remove(k, now) }
@@ -96,14 +97,21 @@ class ControlsView(
         return true
     }
 
-    private fun moveStick(s: Elem, x: Float, y: Float) {
+    private fun moveStick(k: Long, s: Elem, x: Float, y: Float, now: Long) {
+        if (s.spec.shape == Shape.DPAD) {   // joystick-style D-pad: digital directions, like the squares
+            tracker.set(k, geom.dpadStickMask(s, x, y), now)
+            knob[s] = geom.dpadStickKnob(s, x, y); invalidate()
+            return
+        }
         val v = geom.stickValue(s, x, y)
         if (stickPos[s] != v) { stickPos[s] = v; onStick(s.spec.retro, v.first, v.second); invalidate() }
     }
 
     private fun liftStick(k: Long) {
         val s = stickOwner.remove(k) ?: return
-        stickPos.remove(s); onStick(s.spec.retro, 0, 0); invalidate()   // springs back to centre
+        knob.remove(s)
+        if (s.spec.shape == Shape.STICK) { stickPos.remove(s); onStick(s.spec.retro, 0, 0) }
+        invalidate()   // springs back to centre; the direction bits are dropped by tracker.remove
     }
 
     fun stickValue(stick: Int) = stickPos.entries.firstOrNull { it.key.spec.retro == stick }?.value ?: (0 to 0)
@@ -147,7 +155,20 @@ class ControlsView(
         for (e in layout.elems) {
             val cx = g.cx(e); val cy = g.cy(e); val r = g.r(e)
             when (e.spec.shape) {
-                Shape.DPAD -> {
+                Shape.DPAD -> if (layout.dpadStick) {
+                    val R = g.dpadStickR(e)
+                    fill.color = col(false)
+                    c.drawCircle(cx, cy, R, fill); c.drawCircle(cx, cy, R, under); c.drawCircle(cx, cy, R, stroke)
+                    // direction marks light up like the D-pad squares
+                    val dirs = listOf(RetroPad.UP to (0f to -1f), RetroPad.DOWN to (0f to 1f), RetroPad.LEFT to (-1f to 0f), RetroPad.RIGHT to (1f to 0f))
+                    for ((id, v) in dirs) {
+                        fill.color = if (mask and RetroPad.bit(id) != 0) Color.argb(alpha, 229, 72, 77) else Color.argb(alpha, 255, 255, 255)
+                        c.drawCircle(cx + v.first * R * 0.8f, cy + v.second * R * 0.8f, R * 0.07f, fill)
+                    }
+                    val (kx, ky) = knob[e] ?: (0f to 0f)
+                    fill.color = col(kx != 0f || ky != 0f)
+                    c.drawCircle(cx + kx * 0.6f, cy + ky * 0.6f, R * 0.42f, fill); c.drawCircle(cx + kx * 0.6f, cy + ky * 0.6f, R * 0.42f, stroke)
+                } else {
                     val dirs = listOf(RetroPad.UP to (0f to -1f), RetroPad.DOWN to (0f to 1f), RetroPad.LEFT to (-1f to 0f), RetroPad.RIGHT to (1f to 0f))
                     val arm = r * 0.36f; val off = r * 0.62f * layout.dpadSpread
                     for ((id, v) in dirs) {
