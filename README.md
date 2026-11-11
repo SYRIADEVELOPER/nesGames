@@ -1,31 +1,71 @@
 # nesGames
 
-Lightweight, offline Android multi-system emulator (package `com.nesgames.app`) built on native libretro cores.
-No ROMs are bundled. The app uses no network, telemetry or background services.
+Lightweight Android multi-system emulator (package `com.nesgames.app`) built on native libretro cores,
+with a PS5-style game library, touch and gamepad controls, and save slots for every game.
 
-## Status (v0.2.0-phase2)
-| Area | State |
-|---|---|
-| NES · Mega Drive · PlayStation | Playable on a Galaxy S24 Ultra |
-| Save system | 4 slots + auto-save + Continue, integrity-checked, verified on all three consoles |
-| Touch controller | Per-console layouts, editor (move / resize / opacity / D-pad gap), presets, haptics, gamepad remap |
-| Library | Room cache, incremental rescans, rename-safe, Recent and Favorites, Arabic + English |
-| GB/GBA/SNES, CHD, release build | Not started |
+**No games and no BIOS files are included.** Use only games and BIOS dumps you own.
 
-See docs/QA_REPORT.md for evidence.
+## Systems
+| System | Core | Status |
+|---|---|---|
+| NES | FCEUmm | Playable |
+| Mega Drive / Genesis | Genesis Plus GX | Playable |
+| PlayStation | PCSX ReARMed (built-in HLE BIOS) | Playable |
+| PlayStation 2 | ARMSX2 (OpenGL ES 3.2) | Experimental: boots to title with the user's own BIOS on a Galaxy S24; gameplay, PS2 saves and memory cards not yet verified |
+| Game Boy / GBA / SNES | — | Not started |
+
+Details and test evidence: [docs/ROM_SUPPORT.md](docs/ROM_SUPPORT.md), [docs/QA_REPORT.md](docs/QA_REPORT.md).
+
+## Features
+- Library: one folder per console, automatic detection, box art, Recent and Favorites, Continue, Arabic and English.
+- Saves: 4 slots plus auto-save per game, with screenshots and integrity checks.
+- Controls: per-console touch layout editor (move, resize, opacity), D-pad squares **or** joystick for movement,
+  haptics, presets, gamepad remapping, analog sticks on PS2.
+- In-game menu in the same style as the library; works with touch and gamepad.
+
+## Install
+Download the APK from the [Releases](../../releases) page (arm64 phones, Android 8.0+).
+The release is signed with a different key from debug builds: uninstall a debug build first,
+and copy your saves out of it before you do.
 
 ## Use
-1. Put your own ROM files in `Download/nesGames/` on the phone.
-2. Open nesGames, tap **Select nesGames folder**, then choose the `nesGames` folder inside Download.
-3. Tap a game. In-game, tap **MENU** or press Back to save/load state, restart or exit.
+1. Create `Download/nesGames/` on the phone with sub-folders such as `NES`, `MegaDrive`, `PS1`, `PS2`, `BIOS`, and put your own games in them.
+2. Open nesGames, tap **Select nesGames folder** and choose `Download/nesGames`.
+3. PS2 only: put a BIOS dumped from your own console (4 MB `.bin`, plus its `.nvm`/`.mec` if you have them) in `BIOS`.
+   Settings → **PS2 BIOS** shows whether it was accepted. On first launch a PS2 disc is copied into app storage once.
+4. Tap a game. In a game, tap **MENU** (or press Back) to save, load, change controls or exit.
+
+## Permissions
+`INTERNET` is used only to download box art from thumbnails.libretro.com. Game folders are reached through the
+Android folder picker. No all-files access, no telemetry, no ads.
 
 ## Build
-Needs JDK 17+ (Android Studio JBR), SDK 37 and NDK 28.2.13676358.
-`gradlew assembleDebug testDebugUnitTest`
+JDK 17+ (Android Studio JBR), Android SDK 37, NDK 28.2.13676358.
 
-Cores are prebuilt into `app/src/main/jniLibs/` from pinned source. See `docs/LICENSE_AUDIT.md` and `tools/`.
-NDK projects cannot build from a path containing spaces, so cores are built from `C:\nesbuild`.
+```
+gradlew testDebugUnitTest assembleDebug
+gradlew assembleRelease
+```
+
+Release signing reads `keystore.properties` in the project root (git-ignored):
+```
+storeFile=C:/path/to/release.jks
+storePassword=...
+keyAlias=...
+keyPassword=...
+```
+Without it, `assembleRelease` produces an unsigned APK.
+
+The emulator cores are prebuilt in `app/src/main/jniLibs/` from pinned sources listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The NDK cannot build from a path containing spaces,
+so the cores were built from a separate folder.
+
+## License
+nesGames is licensed under the **GNU GPL v3.0** (see [LICENSE](LICENSE)), because it ships the GPL-3.0 ARMSX2 core.
+Bundled cores keep their own licenses. Genesis Plus GX forbids commercial use, so nesGames must stay free,
+with no ads or paid features. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/LICENSE_AUDIT.md](docs/LICENSE_AUDIT.md).
 
 ## QA helpers (debug builds only)
-`adb shell am start -n com.nesgames.app/.ui.GameActivity --es test_rom_file /storage/emulated/0/Android/data/com.nesgames.app/files/nesgames_test.nes`
-logs per-second stats to logcat tag `nesGamesQA`. The test ROM is built from `tools/make_test_rom.py`.
+`adb shell am start -n com.nesgames.app/.ui.GameActivity --es system NES --es test_rom_file <path inside app storage>`
+logs per-second stats to logcat tag `nesGamesQA`; `tools/qa.ps1` holds the scripted checks.
+Test ROMs in `tools/testroms` are generated by `tools/make_test_rom.py` (homebrew, no copyrighted content).

@@ -8,3 +8,21 @@
 /captures
 .externalNativeBuild
 .cxx
+
+# signing (never commit keys)
+keystore.properties
+*.jks
+*.keystore
+# user content: games and BIOS dumps are never part of the repository
+*.iso
+*.chd
+*.cso
+*.cue
+*.pbp
+*.img
+/.bios_incoming/
+/.xfer*/
+# build outputs
+*.apk
+*.aab
+!tools/testroms/*.nes

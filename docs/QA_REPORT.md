@@ -176,3 +176,15 @@ Checkpoint before changes: git tag `phase1-checkpoint`; the user's saves were ba
 
 # In-game menu restyle
 Pause, save/load slots, overwrite confirm, controls, remap, disc-copy progress and "can't start" now use one Compose overlay in the library's style (per-game gradient, white pill selection, icons, A/B hints, RTL). D-pad/stick/L1/R1 move, A/Enter select, B back. Log evidence from the user's own session: "MENU open 'Black' tag=pause items=7 / MENU pick #0 'Resume' / MENU closed".
+
+# Release 0.3.0 check (2026-11-11, x86_64 emulator Medium_Phone, release APK)
+| Check | Result | Evidence |
+|---|---|---|
+| Signed with the release key | PASS | apksigner: CN=nesGames, O=SYRIADEVELOPER, SHA-256 e602175d…d0b563 |
+| R8 keeps all 19 JNI methods | PASS | dexdump of NativeBridge |
+| Fresh install, folder pick, library scan | PASS | homebrew test ROM listed under NES |
+| Game boots in the release build | PASS | BOOT_OK NES 60.1 fps, 256x240 |
+| New in-game menu | PASS | rel_menu.png |
+| Movement: Joystick toggle + real drag | PASS | MOVE style=joystick; drag right mask=128 (RIGHT), up mask=16 (UP), release 0 (rel_joystick.png) |
+| Unit tests | PASS | 41/41 |
+| PS2 on the release build | NOT TESTED | emulator is x86_64 (ARMSX2 is arm64 only); the phone was disconnected |

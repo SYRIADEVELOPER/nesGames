@@ -1,3 +1,5 @@
+﻿import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -13,8 +15,8 @@ android {
         applicationId = "com.nesgames.app"
         minSdk = 26          // AAudio
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0-phase2"
+        versionCode = 3
+        versionName = "0.3.0"
         // arm64-v8a = shipping target; x86_64 only so the core can be tested on the PC emulator.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild { cmake { cppFlags += "-std=c++17" } }
@@ -23,10 +25,21 @@ android {
         cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" }
     }
     buildFeatures { compose = true; buildConfig = true }
+    // Release key: keystore.properties (git-ignored) points at a keystore kept outside the repository.
+    // Without it, assembleRelease still builds, but the APK is unsigned.
+    val keyProps = rootProject.file("keystore.properties").takeIf { it.exists() }?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
+    signingConfigs {
+        if (keyProps != null) create("release") {
+            storeFile = file(keyProps.getProperty("storeFile"))
+            storePassword = keyProps.getProperty("storePassword")
+            keyAlias = keyProps.getProperty("keyAlias")
+            keyPassword = keyProps.getProperty("keyPassword")
+        }
+    }
     buildTypes {
         release {
             optimization { enable = true }
-            signingConfig = signingConfigs.getByName("debug") // TODO M7: real release key
+            if (keyProps != null) signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
