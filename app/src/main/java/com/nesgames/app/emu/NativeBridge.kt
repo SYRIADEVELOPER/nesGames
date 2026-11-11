@@ -21,6 +21,10 @@ object NativeBridge {
     /** [frames, videoFrames, audioFrames, underruns, frameHash, centerPixelRGBA, width, height, framesWithInput] */
     external fun nativeGetStats(): LongArray
     external fun nativeGetFps(): Double
+    /** True when the loaded core renders with OpenGL ES on the GL thread (PS2). */
+    external fun nativeIsHw(): Boolean
+    /** Tell native code the GL thread is stopping, so requests stop waiting for it. */
+    external fun nativeGlPaused()
     /** FNV hash of emulated system RAM, or -1 if the core does not expose it. */
     external fun nativeRamHash(): Long
     /** [w, h, ARGB pixels...] of the latest frame, or null before the first frame. */

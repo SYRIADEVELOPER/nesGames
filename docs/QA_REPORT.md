@@ -144,3 +144,17 @@ Checkpoint before changes: git tag `phase1-checkpoint`; the user's saves were ba
 | Memory, Mega Drive running | 95 MB PSS (S24) |
 | Crash buffer during the whole S24 session | 0 nesGames crashes |
 | Audio by ear, long-session soak, low-end phone | NOT TESTED |
+
+
+# PS2 bring-up (2026-11-11)
+| Step | Result | Evidence |
+|---|---|---|
+| armsx2 core loads on S24 (arm64, 33 MB) | PASS | core log, BOOT_OK hw=true |
+| Frontend accepts GLES 3.2 HW render | PASS | "HW render accepted: GLES 3.2" |
+| FBO + context handed to the core | PASS | FBO status 0x8cd5 (complete), Adreno 750, ES 3.2; core: "Captured the frontend's EGL context" |
+| Shared-context request | FIXED, re-test pending | the core asked; the id carries the EXPERIMENTAL bit and was not matched |
+| Resources installed from assets | PASS | files/system/pcsx2/resources populated |
+| No BIOS: clear message, no hang, no crash | PASS | p2_ps2_nobios.png; before the fix the core reported success, then showed black forever |
+| Black (USA) 3.9 GB ISO on device | READY | files/discs/ps2/black.iso, 3,919,609,856 B |
+| Game boot / rendering / audio / FPS | **BLOCKED: needs the user's PS2 BIOS** | |
+| NES / MD regression after the GLES3 change | PASS | slot 1 save/load RAM equal; 0 crashes |

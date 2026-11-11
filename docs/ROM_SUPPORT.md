@@ -7,6 +7,7 @@ Folders under Download/nesGames are created automatically: NES · MegaDrive · P
 | NES/Famicom | .nes, .unif/.unf, .zip (single ROM) | iNES/NES 2.0 magic + PRG>0; "UNIF" | FCEUmm | Playable, saves verified |
 | Mega Drive | .md/.gen, .zip | "SEGA" at 0x100 | Genesis Plus GX | Playable, saves verified |
 | PlayStation | .cue + .bin (single or multi-track) | CUE parsed, every track must exist, MODE2 data track | PCSX ReARMed (HLE BIOS) | Playable from the library (disc copied once to app storage), saves verified |
+| PlayStation 2 | .iso (ISO 9660 checked), .cso, .chd in the PS2 folder | folder + ISO header | ARMSX2 (OpenGL ES 3.2, GPU-rendered) | **Needs the user's own PS2 BIOS** in Download/nesGames/BIOS (4 MiB, ROMDIR-validated, copied once). Core and GPU path start on S24; no game boots yet because there is no BIOS. Analog sticks not yet mapped |
 | GB/GBC/GBA | .gb/.gbc/.gba | header logo / fixed bytes | — | Detected, core not bundled (M4) |
 | SNES | .sfc/.smc | needs internal-header check | — | Not yet (M5) |
 | PS1 .chd / .m3u | — | — | — | Not yet |

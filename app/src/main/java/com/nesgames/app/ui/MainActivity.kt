@@ -78,13 +78,14 @@ private fun controlsFor(s: GameSystem) = when (s) {
     GameSystem.NES -> "D-pad · A · B · Select · Start"
     GameSystem.MD -> "D-pad · A · B · C · Mode · Start"
     GameSystem.PS1 -> "D-pad · ✕ ○ □ △ · L1 · R1 · Select · Start"
+    GameSystem.PS2 -> "D-pad · ✕ ○ □ △ · L1 R1 L2 R2 · Select · Start"
     else -> "D-pad"
 }
 
 /** Console colour family (NES red, Mega Drive blue, PlayStation violet) with a per-game shift. */
 private fun hueOf(g: Game?): Float {
     if (g == null) return 215f
-    val base = when (g.system) { GameSystem.NES -> 355f; GameSystem.MD -> 215f; GameSystem.PS1 -> 265f; else -> 160f }
+    val base = when (g.system) { GameSystem.NES -> 355f; GameSystem.MD -> 215f; GameSystem.PS1 -> 265f; GameSystem.PS2 -> 235f; else -> 160f }
     val shift = ((g.title.hashCode() ushr 3) % 41) - 20   // -20..+20
     return (base + shift + 360f) % 360f
 }
@@ -135,7 +136,7 @@ class MainActivity : ComponentActivity() {
         val tabs = listOf(
             TabDef(stringResource(R.string.tab_all), TabKind.ALL), TabDef(stringResource(R.string.tab_recent), TabKind.RECENT),
             TabDef(stringResource(R.string.tab_favorites), TabKind.FAVORITES),
-            TabDef("NES", TabKind.SYSTEM, GameSystem.NES), TabDef("Mega Drive", TabKind.SYSTEM, GameSystem.MD), TabDef("PlayStation", TabKind.SYSTEM, GameSystem.PS1),
+            TabDef("NES", TabKind.SYSTEM, GameSystem.NES), TabDef("Mega Drive", TabKind.SYSTEM, GameSystem.MD), TabDef("PlayStation", TabKind.SYSTEM, GameSystem.PS1), TabDef("PS2", TabKind.SYSTEM, GameSystem.PS2),
         )
 
         fun rescan(uri: String?) {

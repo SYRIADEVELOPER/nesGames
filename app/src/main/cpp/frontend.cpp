@@ -4,7 +4,11 @@
 #include <dlfcn.h>
 #include <android/log.h>
 #include <aaudio/AAudio.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl32.h>
+#include <EGL/egl.h>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -110,6 +114,21 @@ struct State {
     std::atomic<int64_t> frames{0}, videoFrames{0}, audioFrames{0}, underruns{0}, inputFrames{0};
     std::atomic<uint32_t> lastHash{0}, centerPixel{0};
 
+    // Hardware-rendered cores (e.g. ARMSX2 / PS2): the core draws with OpenGL ES into our FBO on the GL thread.
+    bool hw = false;                   // core asked for SET_HW_RENDER and we accepted
+    retro_hw_render_callback hwcb{};
+    bool hwReady = false;              // context_reset done for the current EGL context
+    GLuint hwFbo = 0, hwTex = 0;
+    int hwTexW = 0, hwTexH = 0;
+    unsigned maxW = 0, maxH = 0;
+    std::atomic<unsigned> hwW{0}, hwH{0};
+    double hwAcc = 0;
+    std::chrono::steady_clock::time_point hwLast{};
+    std::mutex jobMutex;
+    std::condition_variable jobCv;
+    std::deque<std::function<void()>> jobs;   // work that must run on the GL thread (save/load/readback/shutdown)
+    std::atomic<bool> glAlive{false};
+
     // GL
     GLuint prog = 0, tex = 0;
     GLint locPos = -1, locUv = -1;
@@ -126,6 +145,24 @@ void coreLog(enum retro_log_level level, const char *fmt, ...) {
     __android_log_print(level >= RETRO_LOG_ERROR ? ANDROID_LOG_ERROR : ANDROID_LOG_INFO, "nesGamesCore", "%s", buf);
 }
 
+uintptr_t hwGetFramebuffer() { return g.hwFbo; }
+
+retro_proc_address_t hwGetProc(const char *sym) {
+    auto p = (retro_proc_address_t) eglGetProcAddress(sym);
+    if (!p) {   // core GLES entry points are not always returned by eglGetProcAddress
+        static void *gles = dlopen("libGLESv3.so", RTLD_NOW | RTLD_LOCAL);
+        if (gles) p = (retro_proc_address_t) dlsym(gles, sym);
+    }
+    return p;
+}
+
+// Core option overrides this frontend needs. Anything else: the core's documented default.
+const char *optionOverride(const char *key) {
+    if (!key) return nullptr;
+    if (!strcmp(key, "armsx2_renderer")) return "OpenGL";   // our HW path is OpenGL ES; Vulkan negotiation is not implemented
+    return nullptr;
+}
+
 bool environment(unsigned cmd, void *data) {
     switch (cmd & ~RETRO_ENVIRONMENT_EXPERIMENTAL) {
         case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY: *(const char **) data = g.systemDir.c_str(); return true;
@@ -139,7 +176,7 @@ bool environment(unsigned cmd, void *data) {
         case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: ((retro_log_callback *) data)->log = coreLog; return true;
         case RETRO_ENVIRONMENT_GET_CAN_DUPE: *(bool *) data = true; return true;
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: *(bool *) data = false; return true;
-        case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS: return true;
+        case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS & ~RETRO_ENVIRONMENT_EXPERIMENTAL: return true;
         case RETRO_ENVIRONMENT_GET_LANGUAGE: *(unsigned *) data = RETRO_LANGUAGE_ENGLISH; return true;
         case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE: if (data) *(int *) data = 3; return true;
         case RETRO_ENVIRONMENT_SET_GEOMETRY: {
@@ -147,6 +184,37 @@ bool environment(unsigned cmd, void *data) {
             g.aspect = geo->aspect_ratio > 0 ? geo->aspect_ratio : (float) geo->base_width / (float) geo->base_height;
             return true;
         }
+        case RETRO_ENVIRONMENT_SET_HW_RENDER: {
+            auto *cb = (retro_hw_render_callback *) data;
+            bool gles = cb->context_type == RETRO_HW_CONTEXT_OPENGLES3 || cb->context_type == RETRO_HW_CONTEXT_OPENGLES2 ||
+                        (cb->context_type == RETRO_HW_CONTEXT_OPENGLES_VERSION && cb->version_major == 3 && cb->version_minor <= 2);
+            if (!gles) { LOGI("HW render refused: type=%d %u.%u", cb->context_type, cb->version_major, cb->version_minor); return false; }
+            cb->get_current_framebuffer = hwGetFramebuffer;
+            cb->get_proc_address = hwGetProc;
+            g.hwcb = *cb;
+            g.hw = true;
+            LOGI("HW render accepted: GLES %u.%u depth=%d stencil=%d bottomLeft=%d", cb->version_major, cb->version_minor, cb->depth, cb->stencil, cb->bottom_left_origin);
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER: *(unsigned *) data = RETRO_HW_CONTEXT_OPENGLES_VERSION; return true;
+        case RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT & ~RETRO_ENVIRONMENT_EXPERIMENTAL: return true;   // id carries the EXPERIMENTAL bit
+        case RETRO_ENVIRONMENT_GET_VARIABLE: {
+            auto *v = (retro_variable *) data;
+            const char *o = optionOverride(v->key);
+            if (!o) return false;
+            v->value = o;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: {
+            auto *av = (const retro_system_av_info *) data;
+            if (av->timing.fps > 1) g.fps = av->timing.fps;
+            if (av->geometry.aspect_ratio > 0) g.aspect = av->geometry.aspect_ratio;
+            if (av->geometry.max_width > g.maxW) g.maxW = av->geometry.max_width;
+            if (av->geometry.max_height > g.maxH) g.maxH = av->geometry.max_height;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
+        case RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE:
         case RETRO_ENVIRONMENT_SET_VARIABLES:
         case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
         case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
@@ -163,6 +231,10 @@ bool environment(unsigned cmd, void *data) {
 inline uint32_t rgba(uint8_t r, uint8_t gg, uint8_t b) { return r | (gg << 8) | (b << 16) | 0xFF000000u; }
 
 void videoRefresh(const void *data, unsigned w, unsigned h, size_t pitch) {
+    if (data == RETRO_HW_FRAME_BUFFER_VALID) {   // drawn into our FBO by the core
+        g.hwW = w; g.hwH = h; g.videoFrames++;
+        return;
+    }
     if (!data) return;  // duped frame: keep previous image
     std::vector<uint32_t> out(w * h);
     const auto *src = (const uint8_t *) data;
@@ -344,6 +416,39 @@ bool readFile(const std::string &path, std::vector<uint8_t> &out, size_t maxSize
     return ok;
 }
 
+/** Runs fn on the GL thread (HW cores) and waits for it; returns false on timeout or if the GL thread is gone. */
+bool runOnGl(std::function<void()> fn, int timeoutMs = 4000) {
+    if (!g.glAlive) return false;
+    auto done = std::make_shared<bool>(false);
+    {
+        std::lock_guard<std::mutex> lk(g.jobMutex);
+        g.jobs.emplace_back([fn, done] { fn(); std::lock_guard<std::mutex> l2(g.jobMutex); *done = true; g.jobCv.notify_all(); });
+    }
+    std::unique_lock<std::mutex> lk(g.jobMutex);
+    return g.jobCv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] { return *done; });
+}
+
+void drainJobs() {
+    for (;;) {
+        std::function<void()> j;
+        {
+            std::lock_guard<std::mutex> lk(g.jobMutex);
+            if (g.jobs.empty()) return;
+            j = std::move(g.jobs.front());
+            g.jobs.pop_front();
+        }
+        j();
+    }
+}
+
+void hwDestroyLocked() {   // GL thread, coreMutex held
+    if (g.hwReady && g.hwcb.context_destroy) g.hwcb.context_destroy();
+    if (g.hwFbo) glDeleteFramebuffers(1, &g.hwFbo);
+    if (g.hwTex) glDeleteTextures(1, &g.hwTex);
+    g.hwFbo = g.hwTex = 0; g.hwTexW = g.hwTexH = 0;
+    g.hwReady = false;
+}
+
 bool saveSramLocked() {
     if (!g.loaded || g.sramPath.empty()) return false;
     size_t sz = g.core.get_memory_size(RETRO_MEMORY_SAVE_RAM);
@@ -361,6 +466,7 @@ std::string jstr(JNIEnv *env, jstring s) {
 }
 
 void stopAndUnload() {
+    if (g.hw && g.hwReady) runOnGl([] { std::lock_guard<std::mutex> lk(g.coreMutex); hwDestroyLocked(); }, 3000);
     g.running = false;
     if (g.emuThread.joinable()) g.emuThread.join();
     closeAudio();
@@ -371,6 +477,7 @@ void stopAndUnload() {
         g.core.deinit();
         g.loaded = false;
     }
+    g.hw = false; g.hwReady = false; g.hwW = 0; g.hwH = 0; g.maxW = g.maxH = 0;
     if (!g.tempRomPath.empty()) { remove(g.tempRomPath.c_str()); g.tempRomPath.clear(); }
     g.romData.clear();
     g.romData.shrink_to_fit();
@@ -404,6 +511,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_nesgames_app_emu_NativeBridge_nati
 
     std::lock_guard<std::mutex> lk(g.coreMutex);
     auto &c = g.core;
+    g.hw = false; g.hwReady = false; g.hwW = 0; g.hwH = 0; g.maxW = g.maxH = 0; g.hwAcc = 0; g.hwLast = {};
     c.set_environment(environment);
     c.set_video_refresh(videoRefresh);
     c.set_audio_sample(audioSample);
@@ -449,7 +557,10 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_nesgames_app_emu_NativeBridge_nati
     openAudio();
     g.paused = false;
     g.running = true;
-    g.emuThread = std::thread(emuLoop);
+    if (av.geometry.max_width > g.maxW) g.maxW = av.geometry.max_width;
+    if (av.geometry.max_height > g.maxH) g.maxH = av.geometry.max_height;
+    if (g.hw) LOGI("HW core: frames are driven by the GL thread (max %ux%u)", g.maxW, g.maxH);
+    else g.emuThread = std::thread(emuLoop);
     return nullptr;
 }
 
@@ -463,25 +574,25 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeS
 
 extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetInput(JNIEnv *, jobject, jint port, jint mask) { if (port >= 0 && port < 2) g.input[port] = (uint32_t) mask; }
 
-extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeReset(JNIEnv *, jobject) { std::lock_guard<std::mutex> lk(g.coreMutex); if (g.loaded) g.core.reset(); }
+static void resetImpl() { std::lock_guard<std::mutex> lk(g.coreMutex); if (g.loaded) g.core.reset(); }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSaveSram(JNIEnv *, jobject) { std::lock_guard<std::mutex> lk(g.coreMutex); return saveSramLocked(); }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSaveState(JNIEnv *env, jobject, jstring path) {
+static bool saveStateImpl(const std::string &path) {
     std::lock_guard<std::mutex> lk(g.coreMutex);
     if (!g.loaded) return false;
     size_t sz = g.core.serialize_size();
     if (!sz) return false;
     std::vector<uint8_t> buf(sz);
     if (!g.core.serialize(buf.data(), sz)) return false;
-    return writeFile(jstr(env, path), buf.data(), sz);
+    return writeFile(path, buf.data(), sz);
 }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeLoadState(JNIEnv *env, jobject, jstring path) {
+static bool loadStateImpl(const std::string &path) {
     std::lock_guard<std::mutex> lk(g.coreMutex);
     if (!g.loaded) return false;
     std::vector<uint8_t> buf;
-    if (!readFile(jstr(env, path), buf, 64u << 20)) return false;
+    if (!readFile(path, buf, 256u << 20)) return false;
     size_t expect = g.core.serialize_size();
     if (buf.empty() || buf.size() != expect) {   // truncated / foreign file: never hand it to the core
         LOGE("state rejected: %zu bytes, core expects %zu", buf.size(), expect);
@@ -496,7 +607,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nat
 }
 
 // FNV-1a of the emulated system RAM: QA evidence that a load restored the real game position.
-extern "C" JNIEXPORT jlong JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeRamHash(JNIEnv *, jobject) {
+static long long ramHashImpl() {
     std::lock_guard<std::mutex> lk(g.coreMutex);
     if (!g.loaded) return -1;
     size_t sz = g.core.get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
@@ -504,9 +615,26 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_nesgames_app_emu_NativeBridge_native
     if (!sz || !p) return -1;
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < sz; i++) { h ^= p[i]; h *= 16777619u; }
-    return (jlong) h;
+    return (long long) h;
 }
 
+
+template<typename F>
+static auto onCoreThread(F f) -> decltype(f()) {
+    if (!g.hw) return f();
+    decltype(f()) r{};
+    if (!runOnGl([&] { r = f(); })) LOGE("GL thread did not run the request in time");
+    return r;
+}
+extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeReset(JNIEnv *, jobject) { onCoreThread([] { resetImpl(); return 0; }); }
+extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSaveState(JNIEnv *env, jobject, jstring path) {
+    std::string p = jstr(env, path); return onCoreThread([&] { return saveStateImpl(p); });
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeLoadState(JNIEnv *env, jobject, jstring path) {
+    std::string p = jstr(env, path); return onCoreThread([&] { return loadStateImpl(p); });
+}
+extern "C" JNIEXPORT jlong JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeRamHash(JNIEnv *, jobject) { return (jlong) onCoreThread([] { return ramHashImpl(); }); }
+extern "C" JNIEXPORT jboolean JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeIsHw(JNIEnv *, jobject) { return g.hw; }
 extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSetScaleMode(JNIEnv *, jobject, jint mode) { g.scaleMode = mode; }
 
 extern "C" JNIEXPORT jlongArray JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeGetStats(JNIEnv *env, jobject) {
@@ -536,13 +664,123 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeS
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     g.texW = g.texH = 0;
+    // A new EGL context: any previous HW objects are gone with the old one; context_reset runs again on the next frame.
+    g.hwReady = false; g.hwFbo = g.hwTex = 0; g.hwTexW = g.hwTexH = 0;
+    g.glAlive = true;
     std::lock_guard<std::mutex> lk(g.videoMutex);
     g.newFrame = !g.pending.empty();   // re-upload after context loss
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeSurfaceChanged(JNIEnv *, jobject, jint w, jint h) { g.viewW = w; g.viewH = h; }
 
+// Viewport for a w x h image by the current scale mode, anchored to the top in portrait.
+static void placeImage(int texW, int texH, int &x, int &y, int &w, int &h) {
+    float a = g.aspect;
+    w = g.viewW; h = (int) (g.viewW / a);
+    if (h > g.viewH) { h = g.viewH; w = (int) (g.viewH * a); }
+    if (g.scaleMode == 3) {   // classic 4:3 TV shape
+        a = 4.f / 3.f;
+        w = g.viewW; h = (int) (g.viewW / a);
+        if (h > g.viewH) { h = g.viewH; w = (int) (g.viewH * a); }
+    }
+    if (g.scaleMode == 2) { w = g.viewW; h = g.viewH; }
+    else if (g.scaleMode == 1 && texW > 0 && texH > 0) {
+        int s = std::max(1, std::min(g.viewW / texW, g.viewH / texH));
+        h = texH * s;
+        w = (int) (h * a);
+    }
+    x = (g.viewW - w) / 2;
+    y = g.viewH > g.viewW ? g.viewH - h : (g.viewH - h) / 2;
+}
+
+static void drawQuad(const float *quad) {
+    glUseProgram(g.prog);
+    glVertexAttribPointer(g.locPos, 2, GL_FLOAT, GL_FALSE, 16, quad);
+    glVertexAttribPointer(g.locUv, 2, GL_FLOAT, GL_FALSE, 16, quad + 2);
+    glEnableVertexAttribArray(g.locPos);
+    glEnableVertexAttribArray(g.locUv);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// HW cores: create our FBO, hand the context to the core, run frames at the core's rate, present the FBO.
+static void hwFrame() {
+    if (!g.hwReady) {
+        unsigned w = std::max(g.maxW, 640u), h = std::max(g.maxH, 448u);
+        glGenTextures(1, &g.hwTex);
+        glBindTexture(GL_TEXTURE_2D, g.hwTex);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, (GLsizei) w, (GLsizei) h);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1, &g.hwFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, g.hwFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.hwTex, 0);
+        if (g.hwcb.depth) {
+            GLuint rb; glGenRenderbuffers(1, &rb); glBindRenderbuffer(GL_RENDERBUFFER, rb);
+            glRenderbufferStorage(GL_RENDERBUFFER, g.hwcb.stencil ? GL_DEPTH24_STENCIL8 : GL_DEPTH_COMPONENT24, (GLsizei) w, (GLsizei) h);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, g.hwcb.stencil ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb);
+        }
+        GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        g.hwTexW = (int) w; g.hwTexH = (int) h;
+        LOGI("HW FBO %ux%u status=0x%x GL_VERSION=%s RENDERER=%s", w, h, st, glGetString(GL_VERSION), glGetString(GL_RENDERER));
+        {
+            std::lock_guard<std::mutex> lk(g.coreMutex);
+            if (g.hwcb.context_reset) g.hwcb.context_reset();
+        }
+        g.hwReady = true;
+        g.hwLast = std::chrono::steady_clock::now(); g.hwAcc = 0;
+    }
+
+    // Pacing: run the core at its own rate (display may be 120 Hz), at most 2 frames per vsync, never a catch-up burst.
+    auto now = std::chrono::steady_clock::now();
+    double dt = std::chrono::duration<double>(now - g.hwLast).count();
+    g.hwLast = now;
+    if (g.running && !g.paused) {
+        const double frame = 1.0 / g.fps;
+        g.hwAcc = std::min(g.hwAcc + dt, frame * 3);
+        size_t fill = g.ring.avail(), target = (size_t) (g.sampleRate * 0.06);
+        double adj = fill > target + target / 2 ? 1.005 : (fill < target / 2 ? 0.995 : 1.0);
+        for (int n = 0; n < 2 && g.hwAcc >= frame * adj; n++) {
+            std::lock_guard<std::mutex> lk(g.coreMutex);
+            if (g.paused || !g.loaded) break;
+            g.core.run();
+            g.frames++;
+            if (g.input[0].load(std::memory_order_relaxed)) g.inputFrames++;
+            g.hwAcc -= frame * adj;
+        }
+    } else g.hwAcc = 0;
+
+    // The core shares this context: put back the state our presentation needs.
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindSampler(0, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_CULL_FACE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glViewport(0, 0, g.viewW, g.viewH);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    unsigned w = g.hwW, h = g.hwH;
+    if (!w || !h || !g.hwTex) return;
+    int x, y, vw, vh;
+    placeImage((int) w, (int) h, x, y, vw, vh);
+    glViewport(x, y, vw, vh);
+    glBindTexture(GL_TEXTURE_2D, g.hwTex);
+    float u = (float) w / (float) g.hwTexW, v = (float) h / (float) g.hwTexH;
+    // bottom-left origin: texture row 0 is the bottom of the picture
+    const float quad[] = {-1, -1, 0, 0,  1, -1, u, 0,  -1, 1, 0, v,  1, 1, u, v};
+    drawQuad(quad);
+    glViewport(0, 0, g.viewW, g.viewH);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeDrawFrame(JNIEnv *, jobject) {
+    g.glAlive = true;
+    drainJobs();   // save/load/readback/shutdown requests from other threads
+    if (g.hw && g.loaded) { hwFrame(); return; }
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     glBindTexture(GL_TEXTURE_2D, g.tex);
@@ -561,47 +799,51 @@ extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeD
         }
     }
     if (!g.texW) return;
-    // aspect-correct viewport, anchored to the top in portrait so controls sit below
-    float a = g.aspect;
-    int w = g.viewW, h = (int) (g.viewW / a);
-    if (h > g.viewH) { h = g.viewH; w = (int) (g.viewH * a); }
-    if (g.scaleMode == 3) {   // classic 4:3 TV shape
-        a = 4.f / 3.f;
-        w = g.viewW; h = (int) (g.viewW / a);
-        if (h > g.viewH) { h = g.viewH; w = (int) (g.viewH * a); }
-    }
-    if (g.scaleMode == 2) { w = g.viewW; h = g.viewH; }
-    else if (g.scaleMode == 1) {
-        int s = std::max(1, std::min(g.viewW / g.texW, g.viewH / g.texH));
-        h = g.texH * s;
-        w = (int) (h * a);
-    }
-    int x = (g.viewW - w) / 2;
-    int y = g.viewH > g.viewW ? g.viewH - h : (g.viewH - h) / 2;
+    int x, y, w, h;
+    placeImage(g.texW, g.texH, x, y, w, h);
     glViewport(x, y, w, h);
     static const float quad[] = {-1, -1, 0, 1, 1, -1, 1, 1, -1, 1, 0, 0, 1, 1, 1, 0};
-    glUseProgram(g.prog);
-    glVertexAttribPointer(g.locPos, 2, GL_FLOAT, GL_FALSE, 16, quad);
-    glVertexAttribPointer(g.locUv, 2, GL_FLOAT, GL_FALSE, 16, quad + 2);
-    glEnableVertexAttribArray(g.locPos);
-    glEnableVertexAttribArray(g.locUv);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    drawQuad(quad);
     glViewport(0, 0, g.viewW, g.viewH);
 }
 
+/** GL thread is about to stop (activity paused/finishing): later runOnGl calls must not wait for it. */
+extern "C" JNIEXPORT void JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeGlPaused(JNIEnv *, jobject) {
+    g.glAlive = false;
+    std::lock_guard<std::mutex> lk(g.jobMutex);
+    g.jobCv.notify_all();
+}
+
+static inline jint toArgb(uint32_t p) { return (jint) ((p & 0xFF00FF00u) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF)); }
+
 // Returns [w, h, pixels...] of the latest frame as 0xAARRGGBB (Android Bitmap order), or null.
 extern "C" JNIEXPORT jintArray JNICALL Java_com_nesgames_app_emu_NativeBridge_nativeCopyFrame(JNIEnv *env, jobject) {
-    std::lock_guard<std::mutex> lk(g.videoMutex);
-    if (g.pending.empty() || !g.pw || !g.ph) return nullptr;
-    size_t n = (size_t) g.pw * g.ph;
-    std::vector<jint> out(n + 2);
-    out[0] = (jint) g.pw;
-    out[1] = (jint) g.ph;
-    for (size_t i = 0; i < n; i++) {
-        uint32_t p = g.pending[i];   // stored as R | G<<8 | B<<16 | A<<24
-        out[i + 2] = (jint) ((p & 0xFF00FF00u) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF));
+    std::vector<jint> out;
+    if (g.hw) {
+        // read the core's last frame back from our FBO, on the GL thread (bottom-left origin -> flip rows)
+        runOnGl([&] {
+            unsigned w = g.hwW, h = g.hwH;
+            if (!g.hwFbo || !w || !h) return;
+            std::vector<uint32_t> px((size_t) w * h);
+            glBindFramebuffer(GL_FRAMEBUFFER, g.hwFbo);
+            glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            glReadPixels(0, 0, (GLsizei) w, (GLsizei) h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            out.resize((size_t) w * h + 2);
+            out[0] = (jint) w; out[1] = (jint) h;
+            for (unsigned y = 0; y < h; y++)
+                for (unsigned x = 0; x < w; x++) out[2 + (size_t) y * w + x] = toArgb(px[(size_t) (h - 1 - y) * w + x] | 0xFF000000u);
+        }, 2000);
+    } else {
+        std::lock_guard<std::mutex> lk(g.videoMutex);
+        if (g.pending.empty() || !g.pw || !g.ph) return nullptr;
+        size_t n = (size_t) g.pw * g.ph;
+        out.resize(n + 2);
+        out[0] = (jint) g.pw; out[1] = (jint) g.ph;
+        for (size_t i = 0; i < n; i++) out[i + 2] = toArgb(g.pending[i]);
     }
-    jintArray a = env->NewIntArray((jsize) out.size());
-    env->SetIntArrayRegion(a, 0, (jsize) out.size(), out.data());
-    return a;
+    if (out.empty()) return nullptr;
+    jintArray arr = env->NewIntArray((jsize) out.size());
+    env->SetIntArrayRegion(arr, 0, (jsize) out.size(), out.data());
+    return arr;
 }

@@ -86,4 +86,5 @@
     <string name="d_down">أسفل</string>
     <string name="d_left">يسار</string>
     <string name="d_right">يمين</string>
+    <string name="ps2_bios_missing">يحتاج بلايستيشن 2 إلى ملف BIOS من جهازك الخاص. ضع ملف BIOS (بحجم 4 ميغابايت .bin) في Download/nesGames/BIOS ثم افتح المكتبة مرة أخرى.</string>
 </resources>

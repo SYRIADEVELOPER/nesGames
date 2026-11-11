@@ -96,6 +96,16 @@ class PadLayout(val system: GameSystem) {
                 Spec("TRIANGLE", "△", RetroPad.X, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.2448f, 0.3519f),
                 Spec("L1", "L1", RetroPad.L, Shape.PILL, 0.06f, AH.LEFT, AV.TOP, 0.132f, 0.2f),
                 Spec("R1", "R1", RetroPad.R, Shape.PILL, 0.06f, AH.RIGHT, AV.TOP, 0.132f, 0.2f)) + meta("SELECT")
+            // PlayStation 2: PS1 face buttons + L2/R2 (RetroPad L2 = 12, R2 = 13). Analog sticks: not yet.
+            GameSystem.PS2 -> listOf(dpad,
+                Spec("CIRCLE", "○", RetroPad.A, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.1054f, 0.2125f),
+                Spec("CROSS", "✕", RetroPad.B, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.2448f, 0.0731f),
+                Spec("SQUARE", "□", RetroPad.Y, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.3842f, 0.2125f),
+                Spec("TRIANGLE", "△", RetroPad.X, Shape.CIRCLE, 0.068f, AH.RIGHT, AV.BOTTOM, 0.2448f, 0.3519f),
+                Spec("L1", "L1", RetroPad.L, Shape.PILL, 0.06f, AH.LEFT, AV.TOP, 0.132f, 0.2f),
+                Spec("R1", "R1", RetroPad.R, Shape.PILL, 0.06f, AH.RIGHT, AV.TOP, 0.132f, 0.2f),
+                Spec("L2", "L2", 12, Shape.PILL, 0.06f, AH.LEFT, AV.TOP, 0.132f, 0.075f),
+                Spec("R2", "R2", 13, Shape.PILL, 0.06f, AH.RIGHT, AV.TOP, 0.132f, 0.075f)) + meta("SELECT")
             else -> listOf(dpad,
                 Spec("A", "A", RetroPad.A, Shape.CIRCLE, 0.075f, AH.RIGHT, AV.BOTTOM, 0.1125f, 0.255f),
                 Spec("B", "B", RetroPad.B, Shape.CIRCLE, 0.075f, AH.RIGHT, AV.BOTTOM, 0.2925f, 0.1875f)) + meta("SELECT")

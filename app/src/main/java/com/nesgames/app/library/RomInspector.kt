@@ -8,6 +8,7 @@ enum class GameSystem(val label: String, val short: String) {
     SNES("Super Nintendo", "SNES"),
     MD("Mega Drive / Genesis", "MD"),
     PS1("PlayStation", "PS1"),
+    PS2("PlayStation 2", "PS2"),
 }
 
 /**
@@ -17,7 +18,7 @@ enum class GameSystem(val label: String, val short: String) {
 object RomInspector {
     const val HEADER_BYTES = 0x200
 
-    val SUPPORTED_EXTENSIONS = setOf("nes", "unif", "unf", "gb", "gbc", "gba", "sfc", "smc", "md", "gen", "zip", "cue", "chd")
+    val SUPPORTED_EXTENSIONS = setOf("nes", "unif", "unf", "gb", "gbc", "gba", "sfc", "smc", "md", "gen", "zip", "cue", "chd", "iso", "cso")
     private val IGNORED_EXTENSIONS = setOf("srm", "sav", "state", "rtc", "bin", "bios", "rom")
 
     fun extensionOf(name: String) = name.substringAfterLast('.', "").lowercase()
@@ -54,6 +55,24 @@ object RomInspector {
         // SNES has no magic number at file start; accept by extension only for later header checks (M5).
         if (ext == "sfc" || ext == "smc") return null
         return null
+    }
+
+    /** ISO 9660 volume descriptor ("CD001" at 0x8001): a disc image. Which console is decided by the folder. */
+    fun isIso9660(sector16: ByteArray) = sector16.size >= 6 && String(sector16, 1, 5, Charsets.US_ASCII) == "CD001"
+
+    /**
+     * A PS2 BIOS image: 4 MiB with a ROMDIR whose first entry is "RESET". Checked before a file is copied
+     * into the emulator, so a random .bin in the BIOS folder is never used as firmware.
+     */
+    fun isPs2Bios(size: Long, head: ByteArray): Boolean {
+        if (size != 4L shl 20) return false
+        val needle = byteArrayOf('R'.code.toByte(), 'E'.code.toByte(), 'S'.code.toByte(), 'E'.code.toByte(), 'T'.code.toByte(), 0, 0, 0, 0, 0)
+        outer@ for (i in 0..head.size - needle.size) {
+            for (j in needle.indices) if (head[i + j] != needle[j]) continue@outer
+            val rest = String(head, i, minOf(64, head.size - i), Charsets.ISO_8859_1)
+            if (rest.contains("ROMDIR")) return true
+        }
+        return false
     }
 
     /** Zip entry names that could escape a target directory or are otherwise unsafe. */

@@ -86,4 +86,5 @@
     <string name="d_down">Down</string>
     <string name="d_left">Left</string>
     <string name="d_right">Right</string>
+    <string name="ps2_bios_missing">PlayStation 2 needs a BIOS from your own PS2 console. Put the BIOS file (4 MB .bin) in Download/nesGames/BIOS, then open the library again.</string>
 </resources>

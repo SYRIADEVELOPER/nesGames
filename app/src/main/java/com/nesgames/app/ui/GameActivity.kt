@@ -43,6 +43,7 @@ import com.nesgames.app.emu.RetroPad
 import com.nesgames.app.library.Covers
 import com.nesgames.app.library.GameSystem
 import com.nesgames.app.library.LibraryScanner
+import com.nesgames.app.library.RomInspector
 import com.nesgames.app.library.SaveSlots
 import com.nesgames.app.library.Settings
 import kotlinx.coroutines.Dispatchers
@@ -108,6 +109,24 @@ class GameActivity : ComponentActivity() {
         return true
     }
 
+    private var discFd: android.os.ParcelFileDescriptor? = null
+
+    /** The ARMSX2 core reads its shaders, fonts and game database from <system>/pcsx2/resources (bundled in assets). */
+    private fun installPs2Resources() {
+        val root = File(filesDir, "system/pcsx2")
+        val marker = File(root, "resources/.installed-${BuildConfig.VERSION_CODE}")
+        File(root, "bios").mkdirs()
+        if (marker.exists()) return
+        fun copy(asset: String, out: File) {
+            val kids = assets.list(asset).orEmpty()
+            if (kids.isEmpty()) { out.parentFile?.mkdirs(); assets.open(asset).use { i -> out.outputStream().use { i.copyTo(it) } } }
+            else for (k in kids) copy("$asset/$k", File(out, k))
+        }
+        copy("pcsx2/resources", File(root, "resources"))
+        marker.writeText("ok")
+        Log.i(QA_TAG, "PS2 resources installed")
+    }
+
     private var playSeconds = 0
     private var snapshotTries = 0
 
@@ -150,7 +169,8 @@ class GameActivity : ComponentActivity() {
         layout = LayoutStore.load(this, system)
         padMap = LayoutStore.loadMap(this, system)
         gl = GLSurfaceView(this).apply {
-            setEGLContextClientVersion(2)
+            // GPU-rendering cores (PS2) need an OpenGL ES 3.x context; the others draw a plain texture.
+            setEGLContextClientVersion(if (system == GameSystem.PS2) 3 else 2)
             preserveEGLContextOnPause = true
             setRenderer(object : GLSurfaceView.Renderer {
                 override fun onSurfaceCreated(g: GL10?, c: EGLConfig?) = NativeBridge.nativeSurfaceCreated()
@@ -184,14 +204,30 @@ class GameActivity : ComponentActivity() {
 
     private suspend fun load() {
         val corePath = Cores.corePath(this, system) ?: return fail(getString(R.string.no_core, system.label))
+        // The PS2 core "loads" without a BIOS and then shows nothing, so check first and say why.
+        if (system == GameSystem.PS2 && File(filesDir, "system/pcsx2/bios").listFiles { f -> f.length() == 4L shl 20 }.isNullOrEmpty()) {
+            Log.e(QA_TAG, "BOOT_FAIL no PS2 BIOS")
+            return fail(getString(R.string.ps2_bios_missing))
+        }
         val result = withContext(Dispatchers.IO) {
             runCatching {
+                if (system == GameSystem.PS2) installPs2Resources()
                 val testFile = intent.getStringExtra(EXTRA_TEST_FILE)
                 val (name, bytes) = if (BuildConfig.DEBUG && testFile != null) {
                     val f = File(testFile).canonicalFile
                     require(f.path.startsWith(filesDir.canonicalPath) || f.path.startsWith(getExternalFilesDir(null)!!.canonicalPath)) { "test ROM outside app storage" }
                     // discs (cue/chd/bin) stay on disk; the core opens the cue and its referenced tracks
                     if (f.extension.lowercase() in setOf("cue", "chd", "bin", "iso", "pbp")) f.path to ByteArray(0) else f.name to f.readBytes()
+                } else if (system == GameSystem.PS2) {
+                    // A multi-GB disc is opened in place: the core gets a symlink (with the right extension)
+                    // to this process's open file descriptor of the SAF document. Nothing is copied.
+                    val name = intent.getStringExtra(EXTRA_NAME) ?: "disc.iso"
+                    val pfd = contentResolver.openFileDescriptor(Uri.parse(intent.getStringExtra(EXTRA_URI)), "r") ?: error("Cannot open the disc")
+                    discFd = pfd
+                    val link = File(cacheDir, "disc." + RomInspector.extensionOf(name).ifEmpty { "iso" })
+                    link.delete()
+                    android.system.Os.symlink("/proc/self/fd/${pfd.fd}", link.path)
+                    link.path to ByteArray(0)
                 } else if (intent.getStringExtra(EXTRA_DIR) != null) {
                     // CUE disc: copy cue + tracks into app storage once, then let the core open them by path
                     val name = intent.getStringExtra(EXTRA_NAME) ?: "disc.cue"
@@ -220,7 +256,11 @@ class GameActivity : ComponentActivity() {
                 NativeBridge.nativeLoad(corePath, name, bytes, sys.path, saves.path, SaveSlots.sram(this@GameActivity, gameId).path, cacheDir.path)
             }.getOrElse { Log.e(QA_TAG, "load error", it); it.message ?: "read error" }
         }
-        if (result != null) { Log.e(QA_TAG, "BOOT_FAIL $result"); return fail(getString(R.string.core_rejected)) }
+        if (result != null) {
+            Log.e(QA_TAG, "BOOT_FAIL $result")
+            val noBios = system == GameSystem.PS2 && File(filesDir, "system/pcsx2/bios").listFiles().isNullOrEmpty()
+            return fail(getString(if (noBios) R.string.ps2_bios_missing else R.string.core_rejected))
+        }
         screenMode = Settings(applicationContext).screenMode()
         NativeBridge.nativeSetScaleMode(screenMode)
         loaded = true
@@ -235,7 +275,7 @@ class GameActivity : ComponentActivity() {
             toast(if (res == R.string.game_loaded) R.string.continuing else R.string.resume_failed)
         }
         applyPause()
-        Log.i(QA_TAG, "BOOT_OK id=$gameId system=$system fps=${NativeBridge.nativeGetFps()}")
+        Log.i(QA_TAG, "BOOT_OK id=$gameId system=$system fps=${NativeBridge.nativeGetFps()} hw=${NativeBridge.nativeIsHw()}")
         ui.post(qaTick)
     }
 
@@ -481,12 +521,15 @@ class GameActivity : ComponentActivity() {
         super.onPause()
         resumedState = false
         controls.releaseAll(); padMask = 0; qaMask = 0; pushInput()
-        gl.onPause()
+        // Order matters for GPU cores (PS2): their state is saved on the GL thread, so it must still be running.
         if (loaded) {
             NativeBridge.nativeSetPaused(true)
             NativeBridge.nativeSaveSram()
             saveSlot(SaveSlots.AUTO)   // auto-save powers "Continue" on the home screen
+            if (isFinishing) { NativeBridge.nativeUnload(); loaded = false }   // releases the core's GL objects while the context exists
         }
+        NativeBridge.nativeGlPaused()
+        gl.onPause()
     }
 
     override fun onResume() {
@@ -500,6 +543,7 @@ class GameActivity : ComponentActivity() {
         ui.removeCallbacksAndMessages(null)
         if (BuildConfig.DEBUG) runCatching { unregisterReceiver(qaReceiver) }
         if (loaded) { NativeBridge.nativeUnload(); loaded = false }
+        runCatching { discFd?.close() }
         super.onDestroy()
     }
 

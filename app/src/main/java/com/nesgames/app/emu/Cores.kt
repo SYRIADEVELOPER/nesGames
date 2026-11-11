@@ -10,6 +10,7 @@ object Cores {
         GameSystem.NES to "libfceumm_libretro.so",
         GameSystem.MD to "libgenesis_plus_gx_libretro.so",
         GameSystem.PS1 to "libpcsx_rearmed_libretro.so",
+        GameSystem.PS2 to "libarmsx2_libretro.so",
     )
 
     fun isAvailable(system: GameSystem) = system in bundled

@@ -41,6 +41,7 @@ object ConsoleFolders {
         "NES" to GameSystem.NES,
         "MegaDrive" to GameSystem.MD,
         "PS1" to GameSystem.PS1,
+        "PS2" to GameSystem.PS2,
         "GameBoy" to GameSystem.GB,
         "GBA" to GameSystem.GBA,
         "SNES" to GameSystem.SNES,
@@ -49,6 +50,7 @@ object ConsoleFolders {
         "nes" to GameSystem.NES, "famicom" to GameSystem.NES,
         "megadrive" to GameSystem.MD, "genesis" to GameSystem.MD, "md" to GameSystem.MD,
         "ps1" to GameSystem.PS1, "psx" to GameSystem.PS1, "playstation" to GameSystem.PS1,
+        "ps2" to GameSystem.PS2, "playstation2" to GameSystem.PS2,
         "gameboy" to GameSystem.GB, "gb" to GameSystem.GB, "gbc" to GameSystem.GBC,
         "gba" to GameSystem.GBA, "snes" to GameSystem.SNES,
     )
@@ -124,7 +126,9 @@ class LibraryScanner(private val ctx: Context) {
                 }
                 inspected++
                 val found = runCatching {
-                    if (RomInspector.extensionOf(d.name) == "cue") inspectCue(d, dirUri, names, hint)
+                    val ext = RomInspector.extensionOf(d.name)
+                    if (ext == "iso" || ext == "cso" || ext == "chd") inspectDisc(d, hint)
+                    else if (ext == "cue") inspectCue(d, dirUri, names, hint)
                     else if (d.size <= maxRomBytes) inspect(d) else emptyList()
                 }.getOrNull()
                 if (found.isNullOrEmpty()) { rejected++; continue }
@@ -133,6 +137,7 @@ class LibraryScanner(private val ctx: Context) {
         }
         val rootId = DocumentsContract.getTreeDocumentId(tree)
         walk(rootId, DocumentsContract.buildDocumentUriUsingTree(tree, rootId), 0, null)
+        runCatching { importBios(tree, rootId) }.onFailure { Log.w("nesGamesScan", "BIOS import: ${it.message}") }
 
         // New or changed files: keep user data when the id is known, or when a vanished entry has the same fingerprint (rename/move).
         val byId = cached.associateBy { it.id }
@@ -157,12 +162,37 @@ class LibraryScanner(private val ctx: Context) {
         return stats
     }
 
+    /** Copies validated PS2 BIOS images from <root>/BIOS into app storage (files/system/pcsx2/bios). Never downloads anything. */
+    private fun importBios(tree: Uri, rootId: String) {
+        val biosDir = children(tree, rootId).firstOrNull { it.isDir && it.name.equals("BIOS", true) } ?: return
+        val dest = File(ctx.filesDir, "system/pcsx2/bios").apply { mkdirs() }
+        for (d in children(tree, biosDir.docId)) {
+            if (d.isDir || d.size != 4L shl 20 || !RomInspector.isSafeEntryName(d.name) || d.name.contains('/')) continue
+            val out = File(dest, d.name)
+            if (out.length() == d.size) continue
+            val data = ctx.contentResolver.openInputStream(d.uri)?.use { readUpTo(it, (4 shl 20) + 1) } ?: continue
+            if (!RomInspector.isPs2Bios(data.size.toLong(), data.copyOf(minOf(data.size, 256 * 1024)))) { Log.i("nesGamesScan", "BIOS skipped (not a PS2 BIOS): ${d.name}"); continue }
+            val tmp = File(dest, d.name + ".part"); tmp.writeBytes(data); tmp.renameTo(out)
+            Log.i("nesGamesScan", "PS2 BIOS imported: ${d.name}")
+        }
+    }
+
     private fun head(uri: Uri, n: Int) = ctx.contentResolver.openInputStream(uri)?.use { readUpTo(it, n) } ?: ByteArray(0)
 
     private fun fingerprint(g: Game, d: Doc): String {
         val md = MessageDigest.getInstance("SHA-1")
         md.update(head(d.uri, 64 * 1024))
         return md.digest().joinToString("") { "%02x".format(it) } + ":" + g.size
+    }
+
+    /** Single-file PS2 disc images (.iso/.cso/.chd) live in the PS2 folder; an .iso must carry an ISO 9660 header. */
+    private fun inspectDisc(d: Doc, hint: GameSystem?): List<Game> {
+        if (hint != GameSystem.PS2) return emptyList()
+        if (RomInspector.extensionOf(d.name) == "iso") {
+            val head = ctx.contentResolver.openInputStream(d.uri)?.use { s -> s.skip(0x8000); readUpTo(s, 8) } ?: return emptyList()
+            if (!RomInspector.isIso9660(head)) return emptyList()
+        }
+        return listOf(Game(d.uri.toString(), titleOf(d.name), d.name, GameSystem.PS2, d.uri, null, d.size))
     }
 
     /** A CUE is accepted only if every referenced track file exists next to it. */

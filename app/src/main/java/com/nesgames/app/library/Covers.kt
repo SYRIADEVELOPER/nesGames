@@ -26,6 +26,7 @@ object Covers {
         GameSystem.NES to "Nintendo - Nintendo Entertainment System",
         GameSystem.MD to "Sega - Mega Drive - Genesis",
         GameSystem.PS1 to "Sony - PlayStation",
+        GameSystem.PS2 to "Sony - PlayStation 2",
         GameSystem.GB to "Nintendo - Game Boy",
         GameSystem.GBC to "Nintendo - Game Boy Color",
         GameSystem.GBA to "Nintendo - Game Boy Advance",
